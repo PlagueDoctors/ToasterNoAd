@@ -1,5 +1,6 @@
 package com.toaster.noad.feature.settings
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -8,8 +9,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -39,6 +43,7 @@ import com.toaster.noad.ui.theme.NoAdTheme
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsRoute(
+    onNavigateToRules: () -> Unit = {},
     viewModel: SettingsViewModel = viewModel(factory = NoAdViewModelFactory.Factory),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -125,6 +130,7 @@ fun SettingsRoute(
                         SettingClickRow(
                             title = "无障碍跳过规则",
                             subtitle = "${uiState.skipRuleCount} 条已启用",
+                            onClick = onNavigateToRules,
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                         SettingClickRow(
@@ -235,12 +241,41 @@ private fun SettingToggleRow(
     )
 }
 
+/**
+ * 可点击的设置行。
+ *
+ * @param onClick 为 `null` 时渲染为**不可点击**的纯展示行。
+ *
+ * 这个区分是有意保留的：域名黑名单、白名单、日志保留、关于 等行
+ * 目前确实没有可跳转的目标页。给它们传一个空 lambda 会让整行
+ * 出现涟漪反馈却毫无反应 —— 用户会认为"点了没生效"，
+ * 比明确地不可点击更糟。
+ */
 @Composable
-private fun SettingClickRow(title: String, subtitle: String) {
-    ListItem(
-        headlineContent = { Text(title) },
-        supportingContent = { Text(subtitle) },
-    )
+private fun SettingClickRow(
+    title: String,
+    subtitle: String,
+    onClick: (() -> Unit)? = null,
+) {
+    if (onClick == null) {
+        ListItem(
+            headlineContent = { Text(title) },
+            supportingContent = { Text(subtitle) },
+        )
+    } else {
+        ListItem(
+            headlineContent = { Text(title) },
+            supportingContent = { Text(subtitle) },
+            trailingContent = {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            },
+            modifier = Modifier.clickable(onClick = onClick),
+        )
+    }
 }
 
 @Preview(showBackground = true)

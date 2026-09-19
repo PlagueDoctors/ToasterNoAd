@@ -32,6 +32,22 @@
 变为「检测到其他 VPN → 降级为 S4 → 应用级拦截仍然生效」。
 这是一个**纯增益**的变化。
 
+**当前实现进度**（详细状态见 §10）：
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| A | 基础设施（Room / DI / 设计系统） | ✅ 已完成 |
+| B | S1 无障碍 | ⚠️ **代码完成，待实机验证** |
+| C | 网络层公共模块 | ⏳ 待开始 |
+| D | S2 DNS 模式 | ⏳ 待开始 |
+| E | S3 全流量模式 | ⏳ 待开始 |
+| F | S4 Shizuku 增强 | ⏳ 待开始 |
+| G | 统一控制与收尾 | ⏳ 待开始 |
+
+> ⚠️ 阶段 B 曾标记为"✅ 已完成"，实机验证发现规则写入通道缺失、
+> 功能实际不可用。根因与教训见 §10「阶段 B 勘误与修复」——
+> **后续阶段在实机验证通过前一律标记为"代码完成，待实机验证"。**
+
 ---
 
 ## 1. 方案目标
@@ -1130,6 +1146,21 @@ val NetworkFilterMode.requiresShizuku: Boolean
 | **UI 跳过规则** | S1 | 节点选择器（id/text/desc/坐标） |
 | **域名过滤规则** | S2 + S3 + S4（日志归类） | 域名黑白名单（精确/后缀） |
 
+两套规则是**独立的数据链路**，各有自己的资产文件、加载器、数据表与测试：
+
+| 维度 | UI 跳过规则 | 域名过滤规则 |
+|---|---|---|
+| 资产文件 | `assets/rules/builtin_skip_rules.json` | `assets/rules/builtin_domains.json` |
+| 加载器 | `BuiltinSkipRulesLoader` | `BuiltinRulesLoader` |
+| 数据表 | `skip_rule` | `domain_rule` |
+| 唯一性 | 同应用可多条，按 `priority` 排序 | `(pattern, is_whitelist)` 唯一索引 |
+| 结构 | 按 `apps[]` 分组 | 扁平 `blacklist` / `whitelist` |
+| 来源列 | `source`（v2 起） | `source`（v1 即有） |
+| 测试 | `BuiltinSkipRulesAssetTest` + `BuiltinSkipRulesLoaderTest` | `BuiltinRulesAssetTest` + `BuiltinRulesLoaderTest` |
+
+> **2026-09-19 修正**：本表原先只描述"两套规则"的概念划分，未说明二者在
+> 资产/加载器/表结构上彼此独立。阶段 B 实机验证失败（见 §10 勘误）后补充。
+
 ### 8.2 域名规则模型
 
 ```kotlin
@@ -1235,11 +1266,22 @@ while (true) {
 
 ### 8.5 规则来源
 
+**域名规则**（S2/S3/S4）：
+
 | 来源 | 说明 | 当前状态 |
 |---|---|---|
-| 内置规则 | `assets/rules/builtin_domains.json` | ✅ 已实现 |
+| 内置规则 | `assets/rules/builtin_domains.json`（60 黑 + 6 白） | ✅ 已实现 |
 | 本地导入 | 支持导入 JSON | ⏳ 待实现（Repository 已有 `importBlacklist` / `importWhitelist`） |
 | 用户自定义 | 应用内增删改 | ⏳ 待实现 |
+
+**UI 跳过规则**（S1）：
+
+| 来源 | 说明 | 当前状态 |
+|---|---|---|
+| 内置规则 | `assets/rules/builtin_skip_rules.json`（14 应用 / 20 条） | ✅ 已实现（2026-09-19） |
+| 规则页 | 按应用分组、启停、删除 | ✅ 已实现（2026-09-19） |
+| 用户新增 | 应用内手工创建规则 | ⏳ 待实现（`RuleRepository.add` 已就绪，缺编辑 UI） |
+| 坐标兜底 | 内置不提供（跨分辨率失效） | ⏳ 待实现（用户可自行添加） |
 
 ---
 
@@ -1309,7 +1351,13 @@ while (true) {
     旧的 *.webp 模板机器人图标已移除
 ```
 
-### 阶段 B：S1 无障碍（独立，优先验证）—— ✅ **已完成（2026-09-19）**
+### 阶段 B：S1 无障碍（独立，优先验证）—— ⚠️ **代码完成，待实机验证**
+
+> **状态修正（2026-09-19）**：本阶段曾标记为"✅ 已完成"，
+> 但该结论仅有编译与单测证据，属于**过度声明**。
+> 实机验证发现 S1 规则写入通道完全缺失，功能实际不可用。
+> 完整根因、修复内容与教训见下方「阶段 B 勘误与修复」。
+> **在实机验证通过前，阶段 B 状态一律为"代码完成，待实机验证"。**
 
 5. `NoAdAccessibilityService` + `EventProcessor`
 6. `UiMatcher` + `ClickExecutor`（含降级点击）
@@ -1394,6 +1442,187 @@ AndroidManifest 中 /core/service/NoAdAccessibilityService 已注册，
    - 应用内「拦截日志」页应出现 `ACCESSIBILITY` 来源的记录
    - 若日志为空：先确认纳管了目标应用（**默认不纳管任何应用**），
      且该应用在「应用管理」页的开关已打开
+
+---
+
+### 阶段 B 勘误与修复（2026-09-19，实机验证后补充）
+
+以上"阶段 B ✅ 已完成"的结论**过度声明**。实机测试暴露了一个致命遗漏，
+本节记录根因、修复与教训 —— 后续阶段验收时应对照本节的教训自查。
+
+#### 实机现象
+
+```
+安装成功、无障碍授权成功、应用管理启用全部应用拦截
+→ 打开淘宝/京东/B站等，广告不跳过、拦截日志空、统计恒为 0
+```
+
+#### 根因：规则写入通道完全不存在
+
+从设备拉取 `noad.db` 实测：
+
+```
+target_app    -> 87      （纳管生效）
+domain_rule   -> 66      （域名内置规则已导入）
+skip_rule     -> 0       ← 空
+intercept_log -> 0
+```
+
+链路逐级推导：
+
+```
+skip_rule 恒空
+  → S1RuleCache.buildSnapshot 因 rules.isEmpty() 返回 RuleSnapshot.EMPTY
+  → rulesForPackage() 恒返回 emptyList()
+  → EventProcessor 第 1 道闸（包名）丢弃 100% 事件
+  → 无跳过、无日志、统计恒 0
+```
+
+**代码层面的迷思**：`EventProcessor`、`S1RuleCache`、`UiMatcher`、
+`ClickExecutor`、`AntiMisclickGate` 全部实现正确且有单测覆盖 ——
+但它们共同构成一条**没有入口的流水线**。
+`RuleRepository.add()` / `addAll()` 全项目**零调用点**，
+`assets/` 下只有 `builtin_domains.json`（域名），**没有 S1 规则文件**，
+`feature/` 下**没有规则页**。
+
+> 这就是"单元测试全绿但功能完全不可用"的典型形态：
+> 每个零件都对，装配图缺了一根轴。**单测覆盖的是零件的正确性，
+> 不是链路的连通性。**
+
+#### 修复内容
+
+| 编号 | 内容 | 关键文件 |
+|---|---|---|
+| R4 | 加载器拆分：`BuiltinRuleAssets` 抽出共用读取，两个加载器各自独立 | `BuiltinRuleAssets.kt`、`BuiltinRulesLoader.kt` |
+| R1 | 新增内置跳过规则资产 + 导入管线 + 启动时合并导入 | `builtin_skip_rules.json`、`BuiltinSkipRulesLoader.kt`、`RuleRepository.mergeBuiltin` |
+| R2 | 规则管理页（按应用分组 / 启停 / 删除） | `feature/rules/`、`NoAdDestination.Rules` |
+| R3 | 失败静默治理：`SkipReason` 细分 8 种跳过原因 | `EventProcessor.SkipReason` |
+| R5 | 数据库 v1→v2：`skip_rule` 增加 `source` 列 | `Migrations.kt` |
+
+#### R1 数据规模
+
+`builtin_skip_rules.json`：**14 个应用 / 20 条规则**（2026-09-19）
+
+覆盖：淘宝、京东、B站、微信、抖音、微博、小红书、网易云音乐、
+知乎、美团、腾讯视频、爱奇艺、优酷、UC浏览器。
+
+#### 三个必须记住的设计决策
+
+**1. `source` 列的存在理由**
+
+内置规则随版本更新、用户会停用或删除它们 —— 两者天生冲突。
+不区分来源时应用升级只剩两种坏选择：全量重建（抹掉用户的删除意图）
+或永不更新（内置规则的错误无法通过升级修复）。
+
+因此 `mergeBuiltin` **按业务键合并、只增不改不删**：
+
+| 情况 | 处理 |
+|---|---|
+| 库里没有该键 | 插入 |
+| 库里有、启用中 | 保持不动 |
+| 库里有、已停用 | **保持停用**（否则用户会看到"关掉的规则自己又开了"） |
+
+业务键 = `packageName` + `activityName` + `targetType` + `targetValue`（小写）。
+**不含 `name`**（改名不应被视为新规则）、**不含 `priority`**（调优先级是同一规则的变化）。
+
+> 去重必须**跨来源**进行。若只查内置来源，用户手工建过同定位值的规则时
+> 会导入重复项，两条都会参与匹配与点击。
+
+**2. `source` 存小写字符串，不存 `enum.name`**
+
+`SkipRuleSource.BUILTIN.name` 是 `"BUILTIN"`，而迁移的
+`DEFAULT 'user'`、`SkipRuleEntity.SOURCE_*` 常量都是小写。
+若存枚举名，`WHERE source = 'user'` 查不到代码写入的 `"USER"`，
+现象是"规则莫名消失"。因此枚举带 `persistedName` 字段，
+映射层一律用它。
+
+**3. `CONTAINS` 的误点防护放在规则编写层，不放在匹配器**
+
+`CONTAINS` 的危险是命中正文里的同一串字（规则「跳过」命中一段正文），
+而长文本所在节点往往**可点击**。
+
+防护**没有**实现在 `UiMatcher` 中，原因是那会破坏匹配语义：
+规则页做匹配预览时会得到与运行时不同的结果，用户无法理解
+"规则明明命中却不生效"。因此防护分两层，各司其职：
+
+1. **规则编写约束**：内置文件中 `CONTAINS` 的目标串必须 ≥ 4 字符且专有
+   （由 `BuiltinSkipRulesAssetTest` 断言，"跳过"这类短词根本进不了规则集）
+2. **点击层防护**：`AntiMisclickGate` 冷却与节流，限制"点错后连续点错"
+
+#### R3：失败静默治理
+
+原先所有未处理事件都返回 `ProcessOutcome.Ignored`，
+导致**三种完全不同的故障现象一致**（无拦截、无日志、统计 0）
+但修复动作完全不同：
+
+| SkipReason | 含义 | 用户该做什么 |
+|---|---|---|
+| `APP_NOT_MANAGED` | 应用未纳管 | 去应用管理页添加 |
+| `NO_RULE_FOR_PACKAGE` | 已纳管但无规则 | 等规则更新或自行添加 |
+| `NO_NODE_MATCH` | 有规则但未命中节点 | 规则已过期，需更新定位值 |
+| `ACTIVITY_MISMATCH` | 界面限定不匹配 | 规则只对特定界面生效 |
+| `IRRELEVANT_EVENT` | 事件类型无关 | 无需处理 |
+| `NO_ROOT_NODE` / `EMPTY_NODE_TREE` | 取不到节点树 | 权限或界面切换问题 |
+| `UNKNOWN_PACKAGE` | 事件无包名 | 无需处理 |
+
+Service 侧**只在原因变化时打日志**，避免内容变化事件
+（每秒可达数十次）刷爆主线程日志。
+
+#### 验证证据
+
+```
+JVM 单测（./gradlew testDebugUnitTest）
+  147 tests, 0 failures, 0 skipped        （阶段 B 时 82 → +65）
+  ├── BuiltinSkipRulesLoaderTest   31  【本次新增】
+  ├── BuiltinSkipRulesAssetTest    18  【本次新增】
+  ├── RuleRepositoryTest           16  【本次新增】
+  ├── UiMatcherTest                24
+  ├── AntiMisclickGateTest         13
+  ├── DomainRuleEngineTest         15
+  ├── BuiltinRulesLoaderTest       16
+  ├── BuiltinRulesAssetTest        13
+  └── ExampleUnitTest               1
+  编译告警: 0
+```
+
+```
+仪器测试（MigrationTest，需真机）
+  6 tests —— 覆盖 v1→v2 迁移的列创建、数据保留、停用状态保留、索引可查、
+            迁移后新行默认值
+  状态: 代码完成并通过编译；实机执行由用户负责
+```
+
+#### 踩坑记录
+
+**依赖冲突：`AbstractMethodError: GeneratedSerializer.typeParametersSerializers()`**
+
+引入 `room-testing` 后，`room-migration` 需要用 kotlinx-serialization **1.8.1**
+解析 schema JSON，但 AGP 的 "consistent resolution" 会把主配置里
+被其他库钉住的 **1.7.3** 以 `strictly` 形式传播到 `androidTest` 配置。
+
+崩溃点在测试框架内部（序列化描述符哈希计算），报错位置与真实原因
+完全无关，极难定位。修复方式是在 `app/build.gradle.kts` 显式对齐版本：
+
+```kotlin
+configurations.configureEach {
+    resolutionStrategy { force(libs.kotlinx.serialization.json.get().toString()) }
+}
+```
+
+> 环境信息：`room 2.8.5` + `Kotlin 2.2.10` + `AGP 9.3.2`。
+> 若后续升级这些版本，需复查此约束是否仍必要。
+
+#### 教训（写进后续阶段的验收清单）
+
+1. **链路连通性必须有测试**。"零件全绿"不等于"链路可用"。
+   新增任何策略时，必须有一条端到端断言：
+   *从数据源写入 → 内存缓存可见 → 引擎能消费*。
+2. **"已完成"必须附实机证据**。阶段 B 当时只有编译与单测证据
+   就标记为 ✅ 已完成，这是过度声明。后续阶段在实机验证前
+   一律标记为"代码完成，待实机验证"。
+3. **启动路径上的导入必须双向检查**：既要检查"该导入的导入了"，
+   也要检查"规则表非空"。S1 的问题恰恰是只做了域名规则的导入，
+   跳过了跳过规则。
 
 
 ### 阶段 C：网络层公共模块

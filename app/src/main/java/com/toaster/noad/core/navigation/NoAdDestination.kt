@@ -1,6 +1,8 @@
 package com.toaster.noad.core.navigation
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Rule
+import androidx.compose.material.icons.automirrored.rounded.Rule
 import androidx.compose.material.icons.outlined.Apps
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Insights
@@ -37,6 +39,13 @@ enum class NoAdDestination(
         label = "应用",
         outlinedIcon = Icons.Outlined.Apps,
         selectedIcon = Icons.Rounded.Apps,
+    ),
+    Rules(
+        route = "rules",
+        label = "跳过规则",
+        outlinedIcon = Icons.AutoMirrored.Outlined.Rule,
+        selectedIcon = Icons.AutoMirrored.Rounded.Rule,
+        showInBottomBar = false,
     ),
     Network(
         route = "network",

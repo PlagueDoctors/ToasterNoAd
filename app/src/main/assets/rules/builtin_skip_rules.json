@@ -1,0 +1,260 @@
+{
+  "_comment": "NoAd 内置 S1 跳过规则（开屏广告）。每条规则由 UiMatcher 匹配节点后模拟点击。选取标准见 meta.criteria —— 宁可漏拦，绝不错点。",
+  "version": 1,
+  "updatedAt": "2026-09-19",
+  "meta": {
+    "criteria": [
+      "只收录「关闭/跳过」类控件，不收录任何业务入口（如「立即查看」「领取」「打开应用」）",
+      "优先使用 viewId：它不受文案改写与多语言影响，稳定性最高",
+      "文本规则必须使用完整文案（EXACT），不得用短词做包含匹配",
+      "使用 CONTAINS 时目标串必须足够长且专有（如「跳过广告」而非「跳过」），避免命中正文",
+      "每条规则必须写 note 说明依据，便于后续审计与移除",
+      "同一应用的规则按 priority 从高到低尝试，priority 高的先匹配"
+    ],
+    "matching": "viewId 优先 → 精确文本 → 限定包含。CONTAINS 仅用于「跳过广告」这类绝不会出现在正文中的词组。",
+    "auditNote": "本文件是内置规则的唯一数据源。修改后必须保证 app/src/test 下的 BuiltinSkipRulesAssetTest 全绿 —— 该测试对文件本身的格式与语义约束做断言。",
+    "limitations": "开屏广告控件的 id 与文案随应用版本频繁变化，内置规则必然存在过期情况。规则页支持用户自行增删改以应对失效场景。"
+  },
+  "apps": [
+    {
+      "package": "com.taobao.taobao",
+      "appLabel": "淘宝",
+      "rules": [
+        {
+          "name": "淘宝开屏-跳过按钮",
+          "targetType": "VIEW_ID",
+          "targetValue": "com.taobao.taobao:id/tv_skip",
+          "priority": 100,
+          "note": "淘宝开屏广告右上角「跳过」按钮的经典 id，多个版本沿用"
+        },
+        {
+          "name": "淘宝开屏-跳过文本",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "EXACT",
+          "priority": 60,
+          "note": "兜底：id 失效时按文案匹配。用 EXACT 而非 CONTAINS，避免命中「跳过此步」等引导文案"
+        }
+      ]
+    },
+    {
+      "package": "com.jingdong.app.mall",
+      "appLabel": "京东",
+      "rules": [
+        {
+          "name": "京东开屏-跳过容器",
+          "targetType": "VIEW_ID",
+          "targetValue": "com.jingdong.app.mall:id/skip",
+          "priority": 100,
+          "note": "京东开屏跳过按钮 id"
+        },
+        {
+          "name": "京东开屏-跳过文本",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "EXACT",
+          "priority": 60,
+          "note": "兜底：id 失效时按文案匹配"
+        }
+      ]
+    },
+    {
+      "package": "tv.danmaku.bili",
+      "appLabel": "哔哩哔哩",
+      "rules": [
+        {
+          "name": "B站开屏-跳过按钮",
+          "targetType": "VIEW_ID",
+          "targetValue": "tv.danmaku.bili:id/skip",
+          "priority": 100,
+          "note": "B站开屏广告跳过按钮 id"
+        },
+        {
+          "name": "B站开屏-跳过文本",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "EXACT",
+          "priority": 60,
+          "note": "兜底：id 失效时按文案匹配"
+        },
+        {
+          "name": "B站开屏-跳过广告",
+          "targetType": "TEXT",
+          "targetValue": "跳过广告",
+          "matchMode": "EXACT",
+          "priority": 70,
+          "note": "部分版本使用「跳过广告」四字文案"
+        }
+      ]
+    },
+    {
+      "package": "com.tencent.mm",
+      "appLabel": "微信",
+      "rules": [
+        {
+          "name": "微信朋友圈广告-关闭",
+          "targetType": "DESCRIPTION",
+          "targetValue": "关闭",
+          "matchMode": "EXACT",
+          "priority": 40,
+          "note": "朋友圈广告右上角关闭按钮（内容描述为「关闭」的图片按钮）。微信无开屏广告，此项用于信息流广告关闭入口"
+        }
+      ]
+    },
+    {
+      "package": "com.ss.android.ugc.aweme",
+      "appLabel": "抖音",
+      "rules": [
+        {
+          "name": "抖音开屏-跳过文本",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "EXACT",
+          "priority": 60,
+          "note": "抖音开屏广告跳过按钮（id 随版本变化较大，以文案为主）"
+        },
+        {
+          "name": "抖音开屏-跳过广告",
+          "targetType": "TEXT",
+          "targetValue": "跳过广告",
+          "matchMode": "CONTAINS",
+          "priority": 70,
+          "note": "带倒计时的文案形如「跳过广告 3s」，用 CONTAINS 覆盖变体。目标串足够专有，不会命中正文"
+        }
+      ]
+    },
+    {
+      "package": "com.sina.weibo",
+      "appLabel": "微博",
+      "rules": [
+        {
+          "name": "微博开屏-跳过按钮",
+          "targetType": "VIEW_ID",
+          "targetValue": "com.sina.weibo:id/skip",
+          "priority": 100,
+          "note": "微博开屏跳过按钮 id"
+        },
+        {
+          "name": "微博开屏-跳过文本",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "EXACT",
+          "priority": 60,
+          "note": "兜底：id 失效时按文案匹配"
+        }
+      ]
+    },
+    {
+      "package": "com.xingin.xhs",
+      "appLabel": "小红书",
+      "rules": [
+        {
+          "name": "小红书开屏-跳过文本",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "EXACT",
+          "priority": 60,
+          "note": "小红书开屏广告跳过按钮"
+        }
+      ]
+    },
+    {
+      "package": "com.netease.cloudmusic",
+      "appLabel": "网易云音乐",
+      "rules": [
+        {
+          "name": "网易云音乐开屏-跳过",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "EXACT",
+          "priority": 60,
+          "note": "网易云音乐开屏广告跳过按钮"
+        }
+      ]
+    },
+    {
+      "package": "com.zhihu.android",
+      "appLabel": "知乎",
+      "rules": [
+        {
+          "name": "知乎开屏-跳过文本",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "EXACT",
+          "priority": 60,
+          "note": "知乎开屏广告跳过按钮"
+        }
+      ]
+    },
+    {
+      "package": "com.sankuai.meituan",
+      "appLabel": "美团",
+      "rules": [
+        {
+          "name": "美团开屏-跳过文本",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "EXACT",
+          "priority": 60,
+          "note": "美团开屏广告跳过按钮"
+        }
+      ]
+    },
+    {
+      "package": "com.tencent.qqlive",
+      "appLabel": "腾讯视频",
+      "rules": [
+        {
+          "name": "腾讯视频开屏-跳过",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "EXACT",
+          "priority": 60,
+          "note": "腾讯视频开屏广告跳过按钮"
+        }
+      ]
+    },
+    {
+      "package": "com.qiyi.video",
+      "appLabel": "爱奇艺",
+      "rules": [
+        {
+          "name": "爱奇艺开屏-跳过",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "EXACT",
+          "priority": 60,
+          "note": "爱奇艺开屏广告跳过按钮"
+        }
+      ]
+    },
+    {
+      "package": "com.youku.phone",
+      "appLabel": "优酷",
+      "rules": [
+        {
+          "name": "优酷开屏-跳过",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "EXACT",
+          "priority": 60,
+          "note": "优酷开屏广告跳过按钮"
+        }
+      ]
+    },
+    {
+      "package": "com.UCMobile",
+      "appLabel": "UC浏览器",
+      "rules": [
+        {
+          "name": "UC开屏-跳过",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "EXACT",
+          "priority": 60,
+          "note": "UC浏览器开屏广告跳过按钮"
+        }
+      ]
+    }
+  ]
+}

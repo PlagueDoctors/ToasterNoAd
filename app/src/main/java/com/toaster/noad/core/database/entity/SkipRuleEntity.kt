@@ -52,9 +52,25 @@ data class SkipRuleEntity(
     @ColumnInfo(name = "priority")
     val priority: Int = 0,
 
+    /**
+     * 规则来源，见 [com.toaster.noad.core.model.SkipRuleSource]。
+     *
+     * 默认 `user` 而非 `builtin`：手工插入的数据在语义上都属于用户资产。
+     * 内置导入流程必须显式传 `SOURCE_BUILTIN`，避免"忘了标记"导致
+     * 内置规则被误当作可安全重建的集合。
+     */
+    @ColumnInfo(name = "source")
+    val source: String = SOURCE_USER,
+
     @ColumnInfo(name = "created_at")
     val createdAt: Long = System.currentTimeMillis(),
 
     @ColumnInfo(name = "updated_at")
     val updatedAt: Long = System.currentTimeMillis(),
-)
+) {
+    companion object {
+        const val SOURCE_BUILTIN = "builtin"
+        const val SOURCE_IMPORTED = "imported"
+        const val SOURCE_USER = "user"
+    }
+}

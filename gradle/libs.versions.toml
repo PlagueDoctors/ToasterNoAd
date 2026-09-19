@@ -17,6 +17,8 @@ datastore = "1.2.1"
 coroutines = "1.9.0"
 # org.json 在真实设备上由 Android 框架提供；JVM 单元测试需要显式依赖同 API 的实现
 json = "20240303"
+# kotlinx-serialization：由 room-migration 间接使用，需要显式对齐版本（见 app/build.gradle.kts）
+serialization = "1.8.1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -44,10 +46,14 @@ kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-cor
 androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
 androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
 androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+# 迁移测试：提供 MigrationTestHelper，校验 Migration(n, n+1) 的真实 SQL 行为
+androidx-room-testing = { group = "androidx.room", name = "room-testing", version.ref = "room" }
 # ---- DataStore ----
 androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
 # ---- 测试用的 org.json 实现（仅 JVM 单测）----
 json = { group = "org.json", name = "json", version.ref = "json" }
+# ---- 序列化（仅用于版本对齐，无直接代码依赖）----
+kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "serialization" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

@@ -21,6 +21,64 @@ enum class TargetType {
 }
 
 /**
+ * 跳过规则的来源。
+ *
+ * ## 为什么必须区分来源
+ *
+ * 内置规则与用户规则的**生命周期完全不同**：
+ *
+ * - **内置规则**随应用版本演进，可被整批替换；但用户对它的修改
+ *   （停用/删除）应当在新版本导入时被保留，而不是被覆盖回去。
+ * - **用户规则**是用户手工创建的资产，任何自动流程都不得删除。
+ *
+ * 若不区分来源，应用升级时只剩两种坏选择：要么全量重建
+ * （抹掉用户的删除意图），要么永不更新（内置规则的错误无法通过升级修复）。
+ *
+ * > 与 `DomainRuleEntity.SOURCE_*` 常量保持同名同义，便于记忆与统一处理。
+ */
+enum class SkipRuleSource(
+    /**
+     * 持久化名称。
+     *
+     * 刻意**不使用** `enum.name`（即 `"BUILTIN"`）：数据库里存的是这个值，
+     * 而 `SkipRuleEntity.SOURCE_*` 常量与 v1→v2 迁移的 `DEFAULT 'user'`
+     * 都是小写。若存枚举名，迁移补的默认值 `'user'` 与代码写入的
+     * `"USER"` 会变成两个不同的取值，`WHERE source = 'user'` 查不到新数据 ——
+     * 这类缺陷在迁移测试与查询中才会暴露，且现象是"规则莫名消失"。
+     */
+    val persistedName: String,
+) {
+    /** 随应用内置分发（`assets/rules/builtin_skip_rules.json`） */
+    BUILTIN("builtin"),
+
+    /** 用户导入（后续版本支持） */
+    IMPORTED("imported"),
+
+    /** 用户在应用内手工创建 */
+    USER("user"),
+    ;
+
+    companion object {
+        const val NAME_BUILTIN = "builtin"
+        const val NAME_IMPORTED = "imported"
+        const val NAME_USER = "user"
+
+        /**
+         * 字符串 → 枚举，未知值退回 [USER]。
+         *
+         * 退回 USER 而非 BUILTIN：把"来源不明"当作最需要保护的用户规则对待，
+         * 避免某次导入意外删除它们。
+         */
+        fun fromName(raw: String?): SkipRuleSource =
+            when (raw?.trim()?.lowercase()) {
+                NAME_BUILTIN -> BUILTIN
+                NAME_IMPORTED -> IMPORTED
+                else -> USER
+            }
+    }
+}
+
+/**
  * 文本匹配方式。
  */
 enum class MatchMode {
@@ -75,6 +133,12 @@ data class SkipRule(
 
     /** 排序权重，数值越大越先尝试 */
     val priority: Int = 0,
+
+    /**
+     * 规则来源。决定该规则在「内置规则集重新导入」时的去留策略
+     * （见 [SkipRuleSource]），同时供规则页区分展示。
+     */
+    val source: SkipRuleSource = SkipRuleSource.USER,
 ) {
     /**
      * 坐标型规则的解析结果。

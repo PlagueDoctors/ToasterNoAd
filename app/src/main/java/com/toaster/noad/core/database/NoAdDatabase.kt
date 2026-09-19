@@ -19,10 +19,8 @@ import com.toaster.noad.core.database.entity.TargetAppEntity
  *
  * ## 迁移策略
  *
- * 当前为版本 1（初始版本），**尚未提供任何 Migration**。
- * 在进入需要改表结构的阶段前，必须遵守：
  * - 禁止使用 `fallbackToDestructiveMigration()` 掩盖迁移缺失
- * - 每次改表结构须新增 `Migration(n, n+1)` 并补充迁移测试
+ * - 每次改表结构须新增 `Migration(n, n+1)`（写在 [Migrations] 中）并补充迁移测试
  * - schema 导出目录见 `app/schemas`（由 `room.schemaLocation` 指定）
  */
 @Database(
@@ -47,7 +45,16 @@ abstract class NoAdDatabase : RoomDatabase() {
     abstract fun targetAppDao(): TargetAppDao
 
     companion object {
-        const val VERSION = 1
+        /**
+         * 当前 schema 版本。
+         *
+         * 改动历史：
+         * - v1：初始版本（四张表）
+         * - v2：`skip_rule` 增加 `source` 列，区分内置/导入/用户规则
+         *
+         * 版本号只在此处定义，[Migrations] 中的迁移对象按此对照。
+         */
+        const val VERSION = 2
 
         private const val DATABASE_NAME = "noad.db"
 
@@ -65,9 +72,16 @@ abstract class NoAdDatabase : RoomDatabase() {
                 instance ?: build(context.applicationContext).also { instance = it }
             }
 
-        private fun build(context: Context): NoAdDatabase =
+        /**
+         * 构造数据库实例。
+         *
+         * `internal` 可见性是为了让迁移测试能自建实例（测试需要使用
+         * 临时文件库并显式触发迁移），生产代码只走 [getInstance]。
+         */
+        internal fun build(context: Context): NoAdDatabase =
             Room.databaseBuilder(context, NoAdDatabase::class.java, DATABASE_NAME)
                 // 注意：不调用 fallbackToDestructiveMigration()，破坏性迁移必须显式声明
+                .addMigrations(*Migrations.ALL.toTypedArray())
                 .build()
     }
 }

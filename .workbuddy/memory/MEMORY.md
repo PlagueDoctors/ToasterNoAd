@@ -118,11 +118,37 @@ S2 与 S3 **互斥**；S1 与它们**可并存**；S4 不占 VPN，可与其他�
 
 | 指标 | 当前值 |
 |---|---|
-| 单元测试 | 82 tests / 0 failures（clean build 验证） |
-| 覆盖的测试类 | UiMatcherTest(24)、BuiltinRulesLoaderTest(16)、DomainRuleEngineTest(15)、BuiltinRulesAssetTest(13)、AntiMisclickGateTest(13)、ExampleUnitTest(1) |
-| 构建 | `assembleDebug` 通过，APK ~66MB，编译告警 0 |
+| 单元测试 | **147 tests / 0 failures**（2026-09-19 修复后） |
+| 覆盖的测试类 | BuiltinSkipRulesLoaderTest(31)、UiMatcherTest(24)、BuiltinSkipRulesAssetTest(18)、RuleRepositoryTest(16)、BuiltinRulesLoaderTest(16)、DomainRuleEngineTest(15)、BuiltinRulesAssetTest(13)、AntiMisclickGateTest(13)、ExampleUnitTest(1) |
+| 真机测试 | `MigrationTest`(6) —— 已编写，**由用户执行**，不纳入自动化交付验证 |
+| 构建 | 编译告警 0（`app/src` 下无任何 `^w:`） |
 
-## S1 无障碍（阶段 B 已完成 2026-09-19）
+### ⚠️ 交付验证标准（用户 2026-09-19 明确定界）
+
+> "我不需要你做实机测试或者编译完整apk文件，所有实机测试由我做，
+> 你对实机测试适应太差报错太多，写好代码编译无问题即可"
+
+**唯一验收标准**：`./gradlew testDebugUnitTest` 全绿 + `compileDebugKotlin` 0 error 0 warning。
+**禁止**：运行 `connectedDebugAndroidTest`；把 `assembleDebug` 作为交付条件。
+
+### ⚠️ 序列化依赖冲突修复（不可回退）
+
+`room-testing` 的 `room-migration` 需要 kotlinx-serialization **1.8.1**，
+但 AGP 的 "consistent resolution" 会把主配置的 **1.7.3** 以 `strictly`
+传播到 `debugAndroidTestRuntimeClasspath`，与 Kotlin 2.2.10 生成代码 ABI 不兼容。
+
+现象极具误导性：`AbstractMethodError: GeneratedSerializer.typeParametersSerializers()`
+（报错发生在测试框架内部的描述符哈希计算，**与真实原因完全无关**）。
+
+**必须保留** `app/build.gradle.kts` 中的：
+```kotlin
+configurations.configureEach {
+    resolutionStrategy { force(libs.kotlinx.serialization.json.get().toString()) }
+}
+```
+以及 `libs.versions.toml` 中 `serialization = "1.8.1"`。
+
+## S1 无障碍（阶段 B：代码完成，待实机验证）
 
 **新增文件**（`core/engine/ui/`、`core/service/`、`core/repository/`）：
 
@@ -160,6 +186,103 @@ S2 与 S3 **互斥**；S1 与它们**可并存**；S4 不占 VPN，可与其他�
 
 **默认不纳管任何应用** —— 用户未在「应用管理」勾选前，S1 不会拦截任何应用。
 排查"没效果"时先确认这一点。
+
+## ⭐ skip_rule 规则链路（2026-09-19 修复，改动前必读）
+
+### 曾经的致命缺陷：一条没有入口的流水线
+
+`EventProcessor` / `S1RuleCache` / `UiMatcher` / `ClickExecutor` / `AntiMisclickGate`
+全部实现正确且有单测覆盖，但 `RuleRepository.add/addAll` **全项目零调用点**、
+assets 下**无 S1 规则文件**、`feature/` 下**无规则页** ——
+结果 `skip_rule` 表恒空 → `S1RuleCache` 返回 `EMPTY` → 100% 事件被第 1 道闸丢弃。
+
+**教训：零件全绿 ≠ 链路可用。** 新增/修改这条链路时，
+必须验证「规则能进 DB」而不只是「匹配逻辑正确」。
+
+### 完整链路
+
+```
+assets/rules/builtin_skip_rules.json  (14 应用 / 20 条 / version 1)
+  → BuiltinSkipRulesLoader.load(context)   [逐条容错，坏条目只跳过自己]
+  → RuleRepository.mergeBuiltin(rules)     [跨来源去重 / 只增不改不删]
+  → skip_rule 表 (source = 'builtin')
+  → RuleRepository.observeEnabledRules() → S1RuleCache（AtomicReference 内存快照）
+  → EventProcessor 四道闸 → UiMatcher → ClickExecutor
+```
+
+启动入口：`NoAdApplication.applicationScope.launch { initializeSkipRules() }`
+（`needsBuiltinImport()` 为 true 时才导入）。
+
+### 三条必须遵守的约定
+
+**1. `skip_rule.source` 必须存 `SkipRuleSource.persistedName`（小写字符串）**
+
+```kotlin
+enum class SkipRuleSource(val persistedName: String) {
+    BUILTIN("builtin"), IMPORTED("imported"), USER("user");
+    companion object {
+        const val NAME_BUILTIN = "builtin"; /* ... */
+        fun fromName(raw: String?): SkipRuleSource = ...   // 未知值退回 USER
+    }
+}
+```
+
+**绝不能用 `enum.name`** —— 会得到 `"BUILTIN"`/`"USER"`，
+而 `Migrations` 的 `DEFAULT 'user'` 与 `SkipRuleEntity.SOURCE_*` 都是小写，
+导致 `WHERE source = 'user'` **查不到新数据**，现象是「规则莫名消失」。
+
+**约束**：enum 构造参数**不能引用 companion 常量**
+（`Companion object of enum class ... is uninitialized here`），必须写字面量。
+
+**2. `RuleRepository.mergeBuiltin` 的四条契约（均有单测锁定）**
+
+- **幂等**：重复启动/重复导入不产生重复项
+- **只增不删**：不删除任何存量规则
+- **不改**：用户对规则的改名/停用/删除不被覆盖
+- **跨来源去重**：`allExistingKeys()` 查 `dao.loadAll()` 全表；
+  用户已建同定位值规则时**阻止内置插入**
+
+`SkipRuleDao.insertAll` 必须是 `OnConflictStrategy.IGNORE`。
+用 `REPLACE` 会**重置用户停用状态**并**改变行 id**。
+
+业务键 `SkipRuleKey` = `packageName + activityName + targetType + targetValue.lowercase()`，
+**不含** `name` / `priority`（`UiMatcher` 匹配本身 `ignoreCase`）。
+
+**3. CONTAINS 误点防护放「规则编写层」，**不要**放 `UiMatcher`**
+
+曾尝试在 `matchesContains` 加 8 字符候选长度护栏，
+破坏了既有测试 `given contains rule when node text contains target then matched`
+（用 12 字正文断言应命中）→ **已完全撤回**。
+理由：护栏放匹配器会破坏规则语义，规则页预览会与运行时不一致。
+
+误点防护改由两层承担：
+- **规则编写约束**（`BuiltinSkipRulesAssetTest` 断言）：
+  CONTAINS 目标串 ≥ 4 字符；不含诱导性词汇
+  （立即/领取/查看/下载/打开/安装/购买/下单/抽奖/红包/优惠/开通/授权/同意/允许）
+- **`AntiMisclickGate` 冷却层**：规则 3s / 节点 5s / 全局 400ms
+
+### 失败排查：`SkipReason` 对照表
+
+| 值 | 含义 | 用户该做什么 |
+|---|---|---|
+| `APP_NOT_MANAGED` | 应用未纳管 | 去应用管理页勾选 |
+| `NO_RULE_FOR_PACKAGE` | 该应用无规则 | 等规则库扩充或自建规则 |
+| `ACTIVITY_MISMATCH` | 界面不匹配 | 规则 activity 限定过窄 |
+| `IRRELEVANT_EVENT` | 事件类型无关 | 正常 |
+| `NO_ROOT_NODE` / `EMPTY_NODE_TREE` | 取不到节点树 | ROM 限制 |
+| `NO_NODE_MATCH` | 未命中任何节点 | 规则定位值需更新 |
+
+日志形如 `事件跳过: <REASON>（<中文说明>）`（同值去重，不刷屏）。
+设备 ROM 可能把应用日志置 Silent，此时用 DB / `adb exec-out` 观测。
+
+### 两套规则彼此独立（不要混淆）
+
+| | 域名规则（S2/S3） | UI 跳过规则（S1） |
+|---|---|---|
+| 资产 | `assets/rules/builtin_domains.json` | `assets/rules/builtin_skip_rules.json` |
+| 加载器 | `BuiltinRulesLoader` | `BuiltinSkipRulesLoader` |
+| 表 | `domain_rule` | `skip_rule` |
+| 来源列 | `source`（AD/ANALYTICS/…） | `source`（builtin/imported/user） |
 
 ## 已验证的环境限制
 

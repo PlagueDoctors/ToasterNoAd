@@ -4,6 +4,8 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.toaster.noad.core.engine.ui.AntiMisclickGate
 import com.toaster.noad.core.engine.ui.ClickExecutor
+import com.toaster.noad.core.engine.ui.ClickMethod
+import com.toaster.noad.core.engine.ui.ClickOutcome
 import com.toaster.noad.core.engine.ui.MatchResult
 import com.toaster.noad.core.engine.ui.NodeRecycler
 import com.toaster.noad.core.engine.ui.NodeSnapshot
@@ -12,16 +14,71 @@ import com.toaster.noad.core.engine.ui.UiTreeScanner
 import com.toaster.noad.core.model.SkipRule
 import com.toaster.noad.core.repository.S1RuleCache
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+
+/**
+ * 事件未被处理的原因。
+ *
+ * ## 为什么需要区分「哪一步丢弃的」
+ *
+ * 这类原因曾经只有一个 `Ignored`。后果是线上出问题时**完全不可观测**：
+ *
+ * - 规则表为空 → 所有事件被丢弃
+ * - 规则表正常但文案变了 → 所有事件走到匹配后落空，**同样表现为被丢弃**
+ * - 应用没纳管 → 同样
+ *
+ * 三者现象完全相同（无拦截、无日志、统计恒 0），
+ * 但修复动作完全不同（导入规则 / 更新规则 / 去应用管理页开启）。
+ * 用一个笼统的 `Ignored` 掩盖它们，等于把排障成本转嫁给用户。
+ *
+ * 因此这里按**闸门位置**细分。每一项都对应一个明确、可执行的用户动作。
+ */
+enum class SkipReason(val label: String) {
+    /** 事件没有包名，无法判断归属 */
+    UNKNOWN_PACKAGE("事件无包名"),
+
+    /**
+     * 该应用未被纳管（不在 `target_app` 表中）。
+     *
+     * 对应的用户动作：去「应用管理」页添加该应用。
+     */
+    APP_NOT_MANAGED("应用未纳管"),
+
+    /**
+     * 应用已纳管，但没有匹配当前界面的规则。
+     *
+     * 这是**内置规则集不覆盖该应用**时的典型状态。
+     * 与 [APP_NOT_MANAGED] 必须区分：后者是用户没开，前者是规则没有。
+     */
+    NO_RULE_FOR_PACKAGE("无可用规则"),
+
+    /** Activity 限定不匹配（规则只对特定界面生效） */
+    ACTIVITY_MISMATCH("界面不匹配"),
+
+    /** 事件类型不在监听范围内（如用户点击、滚动） */
+    IRRELEVANT_EVENT("事件类型无关"),
+
+    /** 拿不到界面根节点（权限不足或界面正在切换） */
+    NO_ROOT_NODE("取不到界面节点"),
+
+    /** 节点树为空或全部为跨应用节点 */
+    EMPTY_NODE_TREE("节点树为空"),
+
+    /** 遍历到节点了，但没有一个符合规则条件 */
+    NO_NODE_MATCH("未命中任何节点"),
+}
 
 /**
  * 一次事件处理的结果，供日志与调试使用。
  */
 sealed interface ProcessOutcome {
 
-    /** 事件与本次保护无关，被快速丢弃 */
-    data object Ignored : ProcessOutcome
+    /**
+     * 事件与本次保护无关，被快速丢弃。
+     *
+     * 用 [SkipReason] 而非单一无参对象，见其文档说明的排障理由。
+     */
+    data class Ignored(val reason: SkipReason) : ProcessOutcome
 
     /** 命中规则但被防误点闸门拦下 */
     data class Throttled(val ruleName: String) : ProcessOutcome
@@ -29,7 +86,7 @@ sealed interface ProcessOutcome {
     /** 命中并成功派发点击 */
     data class Clicked(
         val match: MatchResult,
-        val method: com.toaster.noad.core.engine.ui.ClickMethod,
+        val method: ClickMethod,
     ) : ProcessOutcome
 
     /** 命中但点击失败 */
@@ -45,7 +102,7 @@ sealed interface ProcessOutcome {
  * （一次界面变化可产生数次回调）。因此本处理器的原则是：
  *
  * 1. **最快失败**：包名不在纳管集合内立刻返回，不遍历节点树
- * 2. **不查数据库**：`isTarget` 走内存缓存（[S1RuleCache]）
+ * 2. **不查数据库**：规则查询走内存缓存（[S1RuleCache]）
  * 3. **不写数据库**：命中后只派发点击并投递日志到协程，写库在 IO 线程
  * 4. **不过度匹配**：一次事件最多点击一个节点
  *
@@ -86,23 +143,35 @@ class EventProcessor(
         rootProvider: () -> AccessibilityNodeInfo?,
     ): ProcessOutcome {
         val packageName = event.packageName?.toString()
-        if (packageName.isNullOrBlank()) return ProcessOutcome.Ignored
+        if (packageName.isNullOrBlank()) {
+            return ProcessOutcome.Ignored(SkipReason.UNKNOWN_PACKAGE)
+        }
 
         // ---- 第 1 道闸：包名 ----
-        // 绝大多数事件在这一步返回，这是性能的关键
+        // 绝大多数事件在这一步返回，这是性能的关键。
+        // 注意这里区分了两种"没规则"：应用本身没被纳管，还是纳管了但没有规则。
+        if (!ruleCache.isManaged(packageName)) {
+            return ProcessOutcome.Ignored(SkipReason.APP_NOT_MANAGED)
+        }
         val rules = ruleCache.rulesForPackage(packageName)
-        if (rules.isEmpty()) return ProcessOutcome.Ignored
+        if (rules.isEmpty()) {
+            return ProcessOutcome.Ignored(SkipReason.NO_RULE_FOR_PACKAGE)
+        }
 
         // ---- 第 2 道闸：事件类型 ----
-        if (!isRelevantEventType(event.eventType)) return ProcessOutcome.Ignored
+        if (!isRelevantEventType(event.eventType)) {
+            return ProcessOutcome.Ignored(SkipReason.IRRELEVANT_EVENT)
+        }
 
         // ---- 第 3 道闸：Activity 限定 ----
         val activityName = event.className?.toString()
         val applicable = filterByActivity(rules, activityName)
-        if (applicable.isEmpty()) return ProcessOutcome.Ignored
+        if (applicable.isEmpty()) {
+            return ProcessOutcome.Ignored(SkipReason.ACTIVITY_MISMATCH)
+        }
 
         // ---- 遍历节点树 ----
-        val root = rootProvider() ?: return ProcessOutcome.Ignored
+        val root = rootProvider() ?: return ProcessOutcome.Ignored(SkipReason.NO_ROOT_NODE)
         val nodes: List<NodeSnapshot> = try {
             UiTreeScanner.scan(root, packageName)
         } finally {
@@ -110,10 +179,11 @@ class EventProcessor(
             NodeRecycler.recycle(root)
         }
 
-        if (nodes.isEmpty()) return ProcessOutcome.Ignored
+        if (nodes.isEmpty()) return ProcessOutcome.Ignored(SkipReason.EMPTY_NODE_TREE)
 
         // ---- 匹配 ----
-        val best = matcher.matchBest(applicable, nodes) ?: return ProcessOutcome.Ignored
+        val best = matcher.matchBest(applicable, nodes)
+            ?: return ProcessOutcome.Ignored(SkipReason.NO_NODE_MATCH)
 
         // ---- 第 4 道闸：防误点 ----
         val ruleId = best.rule.id.takeIf { it != 0L } ?: best.rule.name.hashCode().toLong()
@@ -134,11 +204,11 @@ class EventProcessor(
         }
 
         return when (outcome) {
-            is com.toaster.noad.core.engine.ui.ClickOutcome.Success -> {
+            is ClickOutcome.Success -> {
                 emitLog(best, packageName, activityName, outcome.method)
                 ProcessOutcome.Clicked(best, outcome.method)
             }
-            is com.toaster.noad.core.engine.ui.ClickOutcome.Failed -> {
+            is ClickOutcome.Failed -> {
                 ProcessOutcome.ClickFailed(best, outcome.reason)
             }
         }
@@ -190,7 +260,7 @@ class EventProcessor(
         match: MatchResult,
         packageName: String,
         activityName: String?,
-        method: com.toaster.noad.core.engine.ui.ClickMethod,
+        method: ClickMethod,
     ) {
         val record = InterceptRecord(
             packageName = packageName,
@@ -218,6 +288,6 @@ data class InterceptRecord(
     val ruleName: String,
     val ruleDetail: String,
     val activityName: String?,
-    val method: com.toaster.noad.core.engine.ui.ClickMethod,
+    val method: ClickMethod,
     val confidence: Int,
 )

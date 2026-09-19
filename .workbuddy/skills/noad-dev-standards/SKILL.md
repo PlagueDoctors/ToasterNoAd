@@ -185,6 +185,33 @@ com.toaster.noad/
 
 `ViewModel` 状态变更逻辑、Repository 数据映射、纯函数工具。
 
+### ⚠️ 资产文件必须有「契约测试」
+
+纯解析器的测试**不能**发现文件本身写错。凡是 `assets/` 下的规则/配置数据，
+必须额外写一个**直接读真实文件**的测试类（`*AssetTest`），断言：
+
+- 数据格式（图案归一化、无重复、分类合法、每条有 `note`）
+- **语义约束**（例如 CONTAINS 目标串长度下限、不含诱导性词汇、无坐标规则）
+- **零假阳性**：对一份"正常界面"样本逐条断言不命中
+
+`BuiltinRulesAssetTest`（域名）与 `BuiltinSkipRulesAssetTest`（UI 跳过）
+都遵循这个模式。这是防止"测试全绿但错误数据直接进用户设备"的唯一手段。
+
+### ⚠️ 交付验证标准（用户明确界定）
+
+**用户自己执行实机测试，不要求我运行仪器测试或产出完整 APK。**
+
+- **必须**：`./gradlew testDebugUnitTest` 全绿
+- **必须**：编译 0 error **0 warning**（项目基线是零告警，弃用 API 也要处理）
+- **不要**：运行 `connectedDebugAndroidTest`
+- **不要**：把 `assembleDebug` 当作交付条件
+
+`src/androidTest/` 下的测试（如 `MigrationTest`）照常编写，但由用户执行。
+
+新增测试如需要 mock，**不要引入 mockk / mockito** —— 项目测试栈只有
+JUnit4 + `kotlinx-coroutines-test` + `org.json` + `room-testing`。
+用**手写假实现**（如内存 `FakeSkipRuleDao`）。
+
 ## 八、质量工具与版本控制
 
 ### 应当
@@ -260,8 +287,104 @@ com.toaster.noad/
 - [ ] 新增测试有真实断言且按 `givenX_whenY_thenZ` 命名
 - [ ] 未实现的功能未被伪装成已实现
 - [ ] 未擅自修改锁定的 SDK / 依赖 / 框架版本
+- [ ] **编译 0 warning**（弃用 API 要处理，不能留 `^w:`）
+- [ ] **改动 `assets/` 下数据后已跑 `*AssetTest`**
+- [ ] **新增链路已确认「有入口」** —— 不只是零件正确，
+      而是数据真的能进 DB、能被读到、能被消费
+- [ ] **改表结构已补 `Migration(n, n+1)` + 迁移测试**，
+      未使用 `fallbackToDestructiveMigration()`
+- [ ] **枚举存库用显式小写字符串**（`persistedName`），未用 `enum.name`
 
-## 十二、S1 无障碍（阶段 B 已实现）
+## 十二、S1 无障碍（阶段 B：代码完成，待实机验证）
+
+### ⚠️ 头号教训：零件全绿 ≠ 链路可用
+
+阶段 B 曾出现**致命缺陷**：`EventProcessor` / `S1RuleCache` / `UiMatcher` /
+`ClickExecutor` / `AntiMisclickGate` 全部实现正确且有单测覆盖，
+但它们构成**一条没有入口的流水线** ——
+`RuleRepository.add/addAll` 全项目零调用点、`assets/` 下无 S1 规则文件、
+`feature/` 下无规则页。
+
+结果：`skip_rule` 表恒空 → `S1RuleCache` 返回 `EMPTY` → 100% 事件被第 1 道闸丢弃
+→ 用户报告「能开无障碍、能勾选应用，但**不跳过、无日志、统计恒 0**」。
+
+**因此新增或修改这条链路时，必须验证「规则能进 DB 并被读到」，
+而不只是验证「匹配逻辑正确」。**
+
+### 完整规则链路（改动前先读）
+
+```
+assets/rules/builtin_skip_rules.json   (14 应用 / 20 条 / version 1)
+  → BuiltinSkipRulesLoader.load(context)   逐条容错，坏条目只跳过自己
+  → RuleRepository.mergeBuiltin(rules)     跨来源去重 / 只增不改不删
+  → skip_rule 表 (source = 'builtin')
+  → RuleRepository.observeEnabledRules() → S1RuleCache（AtomicReference 内存快照）
+  → EventProcessor 四道闸 → UiMatcher → ClickExecutor
+```
+
+启动入口为 `NoAdApplication.initializeSkipRules()`，仅在
+`RuleRepository.needsBuiltinImport()` 为 true 时导入。
+
+### 规则来源的编码约定（极易出错）
+
+**`skip_rule.source` 必须存 `SkipRuleSource.persistedName`（小写字符串），
+绝不能用 `enum.name`。**
+
+- `SkipRuleEntity.SOURCE_*` 与 `Migrations` 的 `DEFAULT 'user'` 都是**小写**
+- 用 `enum.name` 会写入 `"BUILTIN"`/`"USER"`，导致 `WHERE source = 'user'`
+  **查不到新数据**，现象是「规则莫名消失」
+- enum 构造参数**不能引用 companion 常量**（`Companion object of enum class
+  ... is uninitialized here`），必须写字面量：`BUILTIN("builtin")`
+- `fromName()` 的未知值**退回 `USER`**（最需要保护的一类）
+
+### `mergeBuiltin` 的四条契约（均有单测锁定）
+
+1. **幂等** — 重复启动/重复导入不产生重复项
+2. **只增不删** — 不删除任何存量规则
+3. **不改** — 用户对规则的改名 / 停用 / 删除不被覆盖
+4. **跨来源去重** — `allExistingKeys()` 查 `dao.loadAll()` 全表；
+   用户已建同定位值规则时**阻止内置插入**
+
+`SkipRuleDao.insertAll` 必须是 `OnConflictStrategy.IGNORE`。
+用 `REPLACE` 会**重置用户停用状态**并**改变行 id**。
+
+业务键 = `packageName + activityName + targetType + targetValue.lowercase()`，
+**不含** `name` / `priority`。
+
+`Migrations` 的 `DEFAULT 'user'` 不可改成 `'builtin'` ——
+v1 没有任何内置导入路径，存量行必然是用户手工产生的，
+默认 `'builtin'` 会让它们在首次导入的替换步骤中被删除。
+
+### ⚠️ CONTAINS 误点防护放「规则编写层」，不要放 `UiMatcher`
+
+曾尝试在 `UiMatcher.matchesContains` 加 8 字符候选长度护栏，
+破坏了既有测试（用 12 字正文断言 CONTAINS 应命中）→ **已完全撤回**。
+理由：护栏放匹配器会破坏规则语义，**规则页预览会与运行时不一致**。
+
+误点防护改由两层承担：
+
+- **规则编写约束**（`BuiltinSkipRulesAssetTest` 断言）：
+  CONTAINS 目标串 ≥ 4 字符；不含诱导性词汇
+  （立即 / 领取 / 查看 / 下载 / 打开 / 安装 / 购买 / 下单 / 抽奖 /
+  红包 / 优惠 / 开通 / 授权 / 同意 / 允许）
+- **`AntiMisclickGate` 冷却层**：规则 3s / 节点 5s / 全局 400ms
+
+### 失败静默治理
+
+`EventProcessor` 的每道闸门返回带原因的 `ProcessOutcome.Ignored(SkipReason)`，
+日志形如 `事件跳过: <REASON>（<中文说明>）`（`recordSkipReason` 做同值去重防刷屏）。
+
+| `SkipReason` | 含义 | 用户该做什么 |
+|---|---|---|
+| `APP_NOT_MANAGED` | 应用未纳管 | 去应用管理页勾选 |
+| `NO_RULE_FOR_PACKAGE` | 该应用无规则 | 等规则库扩充或自建规则 |
+| `ACTIVITY_MISMATCH` | 界面不匹配 | 规则 activity 限定过窄 |
+| `IRRELEVANT_EVENT` | 事件类型无关 | 正常 |
+| `NO_ROOT_NODE` / `EMPTY_NODE_TREE` | 取不到节点树 | ROM 限制 |
+| `NO_NODE_MATCH` | 未命中任何节点 | 规则定位值需更新 |
+
+**新增闸门时必须给出 `SkipReason`**，不得返回无原因的忽略 ——
+否则用户只能看到"没反应"，无法定位卡在哪一环。
 
 ### 必须
 
@@ -284,6 +407,8 @@ com.toaster.noad/
 - **新定位方式必须给置信度**，并保持 `VIEW_ID > TEXT > DESCRIPTION > COORDINATE`。
 - **UI 必须区分两层授权**：系统设置授权服务 + 应用内开关。
   写文案时不能只说"开启无障碍"，要说明当前缺哪一层。
+- **两个加载器共用资产读取**走 `BuiltinRuleAssets.readAssetText()`，
+  不要各自实现一遍 `assets.open(...)`。
 
 ### 禁止
 
@@ -295,6 +420,8 @@ com.toaster.noad/
   （含输入法、系统弹窗）的事件，徒增开销与误点风险。
 - 在 `EventProcessor` 的回调里用 `runBlocking` 写库。回调声明为 `suspend`，
   由 `EventProcessor` 自行在 IO 作用域启动协程。
+- 在规则 JSON 里写 `COORDINATE` 规则（屏幕尺寸差异导致坐标不可移植，
+  资产测试已断言内置规则不含坐标规则）。
 
 ### 服务状态三字段不可合并
 
@@ -302,6 +429,17 @@ com.toaster.noad/
 `appSwitchEnabled` 是三个独立事实。合并成一个布尔值会导致
 「界面显示已开启，但拦截日志一条都没有，且用户不知道哪一环断了」。
 判断是否真正生效用 `isEffectivelyActive`。
+
+### 两套规则彼此独立（不要混淆）
+
+| | 域名规则（S2/S3） | UI 跳过规则（S1） |
+|---|---|---|
+| 资产 | `assets/rules/builtin_domains.json` | `assets/rules/builtin_skip_rules.json` |
+| 加载器 | `BuiltinRulesLoader` | `BuiltinSkipRulesLoader` |
+| 表 | `domain_rule` | `skip_rule` |
+| 资产契约测试 | `BuiltinRulesAssetTest` | `BuiltinSkipRulesAssetTest` |
+| 解析器测试 | `BuiltinRulesLoaderTest` | `BuiltinSkipRulesLoaderTest` |
+
 
 ## 十三、已知待修正项（不要沿用其写法）
 
@@ -325,12 +463,19 @@ com.toaster.noad/
 **工程质量缺口**：
 
 - **Detekt / ktlint 尚未引入** — 静态分析门禁缺失，目前只有单元测试
-- **规则管理页尚未实现** — 仓储与 DAO 已就绪，UI 层未接
 - **`NoAdAccessibilityService.DEBUG_LOG` 目前为 `true`** — 发布前必须关闭，
   否则 logcat 会持续输出每次事件的判定结果
 
-> 已修复（勿回退）：首页策略状态的 `active` 曾写死 `false`，阶段 B 已接入
-> `AccessibilityStateHolder` 的真实状态。
+> 已修复（勿回退）：
+> - 首页策略状态的 `active` 曾写死 `false`，阶段 B 已接入
+>   `AccessibilityStateHolder` 的真实状态。
+> - **跳过规则管理页曾缺失**，导致 `skip_rule` 表恒空、S1 完全失效。
+>   已于 2026-09-19 补齐（`feature/rules/`）+ 内置规则资产 + 启动导入。
+> - **`RuleRepository.add/addAll` 曾零调用点**。新增任何"规则来源"时，
+>   必须确认它真的有写入路径，光有仓储方法不算完成。
+> - **`skip_rule` 的 `source` 列曾用 `enum.name` 存储**（大写），
+>   与迁移的 `DEFAULT 'user'` 不一致，会导致「规则莫名消失」。
+>   必须用 `SkipRuleSource.persistedName`（小写）。
 
 > 处理原则：修一项就删一项，不要在此长期堆积。若某条已确认不打算做，
 > 也要先判定为「不做」并写清原因，而不是让它无限期挂在"待修正"里。

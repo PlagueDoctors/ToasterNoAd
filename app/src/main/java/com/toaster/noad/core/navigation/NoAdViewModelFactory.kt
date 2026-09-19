@@ -9,6 +9,7 @@ import com.toaster.noad.feature.apps.AppsViewModel
 import com.toaster.noad.feature.home.HomeViewModel
 import com.toaster.noad.feature.logs.LogsViewModel
 import com.toaster.noad.feature.network.NetworkViewModel
+import com.toaster.noad.feature.rules.RulesViewModel
 import com.toaster.noad.feature.settings.SettingsViewModel
 
 /**
@@ -59,6 +60,13 @@ object NoAdViewModelFactory {
             NetworkViewModel(
                 settingsRepository = container.settingsRepository,
                 domainRuleRepository = container.domainRuleRepository,
+            )
+        }
+        initializer {
+            val container = applicationContainer()
+            RulesViewModel(
+                ruleRepository = container.ruleRepository,
+                targetAppRepository = container.targetAppRepository,
             )
         }
     }

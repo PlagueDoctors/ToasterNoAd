@@ -57,4 +57,37 @@
     <string name="a11y_hint_restricted_message">Android 13 及以上版本会限制从浏览器等渠道安装的应用开启无障碍服务。若在「已下载的应用」中找不到 NoAd，请点击右上角菜单选择「允许受限设置」后重试。</string>
     <string name="a11y_hint_steps_title">开启步骤</string>
     <string name="a11y_hint_steps_message">1. 在系统设置中找到「已下载的服务」或「已安装的应用」\n2. 找到「NoAd 广告拦截」\n3. 打开开关并确认授权</string>
+
+    <!-- 跳过规则管理 -->
+    <string name="rules_title">跳过规则</string>
+    <string name="rules_search_hint">搜索应用或规则</string>
+    <string name="rules_summary">%1$d 条规则 · 覆盖 %2$d 个应用</string>
+    <string name="rules_summary_empty">暂无规则</string>
+    <string name="rules_empty">暂无跳过规则\n内置规则会随应用更新自动补充</string>
+    <string name="rules_empty_search">未找到匹配的规则</string>
+    <string name="rules_group_builtin">内置规则</string>
+    <string name="rules_group_user">我的规则</string>
+    <string name="rules_badge_builtin">内置</string>
+    <string name="rules_badge_user">自定义</string>
+    <string name="rules_delete_title">删除这条规则？</string>
+    <string name="rules_delete_message">删除后该规则不再生效。若它是内置规则，应用更新时可能会重新出现。</string>
+    <string name="rules_delete_confirm">删除</string>
+    <string name="rules_delete_cancel">取消</string>
+    <string name="rules_type_view_id">控件 ID</string>
+    <string name="rules_type_text">按钮文字</string>
+    <string name="rules_type_description">按钮描述</string>
+    <string name="rules_type_coordinate">屏幕坐标</string>
+    <string name="rules_match_exact">精确</string>
+    <string name="rules_match_contains">包含</string>
+    <string name="rules_match_regex">正则</string>
+    <string name="rules_toggle_enabled">启用</string>
+    <string name="rules_toggle_disabled">停用</string>
+
+    <!-- 设置页规则入口 -->
+    <string name="settings_group_rules">规则</string>
+    <string name="settings_skip_rules">无障碍跳过规则</string>
+    <string name="settings_skip_rules_subtitle">%1$d 条已启用</string>
+    <string name="settings_domain_blacklist">域名黑名单</string>
+    <string name="settings_domain_whitelist">域名白名单</string>
+    <string name="settings_domain_whitelist_hint">%1$d 条（优先于黑名单）</string>
 </resources>

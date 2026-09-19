@@ -85,7 +85,28 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)
+    // 迁移测试需要真机/模拟器：SQLite 的真实行为无法在 JVM 上复现
+    androidTestImplementation(libs.androidx.room.testing)
 
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
+}
+
+// ----------------------------------------------------------------------------
+// 依赖版本对齐
+// ----------------------------------------------------------------------------
+//
+// `room-migration`（由 room-testing 引入）内部使用 kotlinx-serialization 1.8.1
+// 解析 schema JSON，但 AGP 的 "consistent resolution" 会把主配置里
+// 由其他库钉住的 1.7.3 以 `strictly` 形式传播到 androidTest 配置，
+// 导致 1.8.1 被降级。
+//
+// 崩溃现象是 `AbstractMethodError: GeneratedSerializer.typeParametersSerializers()` ——
+// 1.7.3 的序列化运行时与 Kotlin 2.2.10 编译出的生成代码 ABI 不兼容。
+// 这个错误发生在测试框架内部，报错位置与真实原因完全无关，极难定位，
+// 因此这里显式把版本对齐到 room 需要的下限，而不是逐个排除。
+configurations.configureEach {
+    resolutionStrategy {
+        force(libs.kotlinx.serialization.json.get().toString())
+    }
 }

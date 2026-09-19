@@ -8,6 +8,7 @@ import com.toaster.noad.core.data.repository.LogRepository
 import com.toaster.noad.core.data.repository.RuleRepository
 import com.toaster.noad.core.data.repository.TargetAppRepository
 import com.toaster.noad.core.data.rules.BuiltinRulesLoader
+import com.toaster.noad.core.data.rules.BuiltinSkipRulesLoader
 import com.toaster.noad.core.data.settings.SettingsRepository
 import com.toaster.noad.core.database.NoAdDatabase
 import com.toaster.noad.core.database.entity.DomainRuleEntity
@@ -141,6 +142,7 @@ class NoAdApplication : Application() {
 
         applicationScope.launch {
             initializeDomainRules()
+            initializeSkipRules()
             pruneUninstalledTargetApps()
             trimLogOverflow()
         }
@@ -179,6 +181,45 @@ class NoAdApplication : Application() {
             }
 
             repo.rebuildEngine()
+        }
+    }
+
+    /**
+     * 导入内置 S1 跳过规则。
+     *
+     * ## 为什么必须有这一步
+     *
+     * S1 引擎（`EventProcessor` → `S1RuleCache` → `UiMatcher`）在代码层面
+     * 是完整的，但 `skip_rule` 表原本没有任何写入来源。结果是引擎的
+     * 第一道闸门（按包名取规则）永远拿到空列表，**所有无障碍事件
+     * 在第一步就被丢弃** —— 表现为"授权成功、应用已纳管，
+     * 但既不跳过也不产生日志、统计恒为 0"。
+     *
+     * 本方法补上缺失的写入通道。
+     *
+     * ## 幂等性
+     *
+     * [RuleRepository.mergeBuiltin] 按业务键（包名 + 定位方式 + 定位值 +
+     * Activity）合并，只插入缺失项，因此重复启动不会产生重复规则；
+     * 同时它**不会覆盖**用户对内置规则的停用或删除操作，
+     * 避免每次启动都把用户改过的状态抹掉。
+     *
+     * ## 与域名规则导入的差异
+     *
+     * 域名规则表有 `(pattern, is_whitelist)` 唯一索引，可以交给数据库
+     * 用 `INSERT OR IGNORE` 兜底查重；`skip_rule` 没有唯一索引
+     * （同一应用的多条规则本就可以指向同一个定位值，只是优先级不同），
+     * 因此查重必须在 Repository 层显式完成。
+     */
+    private suspend fun initializeSkipRules() {
+        runCatching {
+            val repo = container.ruleRepository
+            if (!repo.needsBuiltinImport()) return@runCatching
+
+            val loaded = BuiltinSkipRulesLoader.load(this)
+            if (loaded.totalCount == 0) return@runCatching
+
+            repo.mergeBuiltin(loaded.rules)
         }
     }
 

@@ -12,6 +12,7 @@ import com.toaster.noad.core.model.InterceptSource
 import com.toaster.noad.core.service.event.EventProcessor
 import com.toaster.noad.core.service.event.InterceptRecord
 import com.toaster.noad.core.service.event.ProcessOutcome
+import com.toaster.noad.core.service.event.SkipReason
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -67,6 +68,14 @@ class NoAdAccessibilityService : AccessibilityService() {
      * 而同一应用会反复产生拦截。缓存后热路径只剩一次哈希查表。
      */
     private val appLabelCache = HashMap<String, String>(INITIAL_LABEL_CACHE)
+
+    /**
+     * 上一次记录过的跳过原因。
+     *
+     * 用于"只在原因变化时打日志"，避免内容变化事件（可达每秒数十次）
+     * 把主线程日志刷爆。见 [recordSkipReason]。
+     */
+    private var lastSkipReason: SkipReason? = null
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -142,9 +151,30 @@ class NoAdAccessibilityService : AccessibilityService() {
             return
         }
 
-        if (DEBUG_LOG && outcome !is ProcessOutcome.Ignored) {
-            log("事件结果: $outcome")
+        if (DEBUG_LOG) {
+            // 未处理的事件也记录原因，但只统计原因分布而不逐条打日志。
+            // 逐条打印会把主线程日志刷爆（内容变化事件每秒可达数十次），
+            // 而这个分布恰恰是判断"到底卡在哪一步"的关键证据 ——
+            // 例如全是 APP_NOT_MANAGED 说明应用没纳管，
+            // 全是 NO_RULE_FOR_PACKAGE 说明内置规则不覆盖该应用。
+            when (val result = outcome) {
+                is ProcessOutcome.Ignored -> recordSkipReason(result.reason)
+                else -> log("事件结果: $result")
+            }
         }
+    }
+
+    /**
+     * 记录一次"事件被跳过"的原因。
+     *
+     * 只在 [SkipReason] 的**统计值发生变化**时打一条日志：
+     * 这样既能通过 logcat 直接看出当前卡在哪一步，
+     * 又不会让日志量随界面刷新频率膨胀。
+     */
+    private fun recordSkipReason(reason: SkipReason) {
+        if (reason == lastSkipReason) return
+        lastSkipReason = reason
+        log("事件跳过: ${reason.name}（${reason.label}）")
     }
 
     override fun onInterrupt() {

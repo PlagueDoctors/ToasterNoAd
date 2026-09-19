@@ -151,9 +151,35 @@ class UiMatcher {
         regex: Regex?,
     ): Boolean = when (mode) {
         MatchMode.EXACT -> candidate.trim().equals(target, ignoreCase = true)
-        MatchMode.CONTAINS -> candidate.contains(target, ignoreCase = true)
+        MatchMode.CONTAINS -> matchesContains(candidate, target)
         MatchMode.REGEX -> regex?.containsMatchIn(candidate) == true
     }
+
+    /**
+     * 包含匹配。
+     *
+     * ## 关于误点防护的边界
+     *
+     * `CONTAINS` 的危险在于"命中正文里的同一串字"（例如规则「跳过」
+     * 命中一段正文），而该策略**不在本类处理**。原因是匹配器只应回答
+     * "文本关系成不成立"这一个问题 —— 一旦让它掺入安全判断，
+     * 规则页做匹配预览时会得到与运行时不同的结果，
+     * 用户将无法理解"为什么规则明明命中却不生效"。
+     *
+     * 因而误点防护由两层承担，各司其职：
+     *
+     * 1. **规则编写约束**：内置规则文件中 `CONTAINS` 的目标串
+     *    必须足够长且专有（由 `BuiltinSkipRulesAssetTest` 断言）。
+     *    这是最有效的一层 —— 短词根本不进规则集。
+     * 2. **点击层防护**：[AntiMisclickGate] 的冷却与节流，
+     *    限制"点错之后连续点错"。
+     *
+     * 节点层不额外过滤过长的候选文本，因为那会误伤
+     * "整块容器文本拼接"的合法场景（跳过按钮与倒计时同在一个
+     * 可点击容器内时，其合并文本可能较长）。
+     */
+    private fun matchesContains(candidate: String, target: String): Boolean =
+        candidate.contains(target, ignoreCase = true)
 
     /**
      * 坐标兜底匹配。

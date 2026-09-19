@@ -12,6 +12,7 @@ import com.toaster.noad.core.model.InterceptLog
 import com.toaster.noad.core.model.InterceptSource
 import com.toaster.noad.core.model.MatchMode
 import com.toaster.noad.core.model.SkipRule
+import com.toaster.noad.core.model.SkipRuleSource
 import com.toaster.noad.core.model.TargetApp
 import com.toaster.noad.core.model.TargetType
 
@@ -35,9 +36,20 @@ fun SkipRuleEntity.toDomain(): SkipRule = SkipRule(
     clickDelayMs = clickDelayMs,
     enabled = enabled,
     priority = priority,
+    source = SkipRuleSource.fromName(source),
 )
 
-fun SkipRule.toEntity(now: Long = System.currentTimeMillis()): SkipRuleEntity = SkipRuleEntity(
+/**
+ * 领域模型 → 实体。
+ *
+ * @param source 覆盖来源。导入流程通过它显式标记 `builtin`；
+ *        常规用户操作传 `null` 即可，此时沿用领域模型自身的 [SkipRule.source]
+ *        （新建规则默认 [SkipRuleSource.USER]）。
+ */
+fun SkipRule.toEntity(
+    now: Long = System.currentTimeMillis(),
+    source: SkipRuleSource? = null,
+): SkipRuleEntity = SkipRuleEntity(
     id = id,
     name = name,
     packageName = packageName,
@@ -48,6 +60,7 @@ fun SkipRule.toEntity(now: Long = System.currentTimeMillis()): SkipRuleEntity = 
     clickDelayMs = clickDelayMs,
     enabled = enabled,
     priority = priority,
+    source = (source ?: this.source).persistedName,
     updatedAt = now,
 )
 

@@ -23,6 +23,7 @@ import com.toaster.noad.feature.apps.AppsRoute
 import com.toaster.noad.feature.home.HomeRoute
 import com.toaster.noad.feature.logs.LogsRoute
 import com.toaster.noad.feature.network.NetworkRoute
+import com.toaster.noad.feature.rules.RulesRoute
 import com.toaster.noad.feature.settings.SettingsRoute
 
 /**
@@ -89,9 +90,18 @@ fun NoAdApp() {
                 )
             }
             composable(NoAdDestination.Apps.route) { AppsRoute() }
+            composable(NoAdDestination.Rules.route) { RulesRoute() }
             composable(NoAdDestination.Network.route) { NetworkRoute() }
             composable(NoAdDestination.Logs.route) { LogsRoute() }
-            composable(NoAdDestination.Settings.route) { SettingsRoute() }
+            composable(NoAdDestination.Settings.route) {
+                SettingsRoute(
+                    onNavigateToRules = {
+                        navController.navigate(NoAdDestination.Rules.route) {
+                            launchSingleTop = true
+                        }
+                    },
+                )
+            }
         }
     }
 }
