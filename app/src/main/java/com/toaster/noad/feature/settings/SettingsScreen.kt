@@ -142,8 +142,11 @@ fun SettingsRoute(
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                         SettingToggleRow(
-                            title = "拦截通知",
-                            subtitle = "拦截时发送通知提醒",
+                            title = stringResource(R.string.intercept_status_toggle_title),
+                            // 语义：控制常驻通知是否实时显示拦截动态（R10 接活）。
+                            // 常驻通知本身是保活 FGS 的系统要求，不可移除；
+                            // 关闭本开关只回退为静态保活文案。
+                            subtitle = stringResource(R.string.intercept_status_toggle_subtitle),
                             checked = settings.showNotification,
                             onToggle = {
                                 viewModel.setShowNotification(!settings.showNotification)

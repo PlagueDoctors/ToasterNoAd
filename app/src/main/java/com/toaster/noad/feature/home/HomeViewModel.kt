@@ -1,17 +1,23 @@
 package com.toaster.noad.feature.home
 
 import android.app.Application
+import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.toaster.noad.R
 import com.toaster.noad.core.database.dao.BlockedAppCount
 import com.toaster.noad.core.data.repository.LogRepository
 import com.toaster.noad.core.data.repository.TargetAppRepository
 import com.toaster.noad.core.data.settings.SettingsRepository
 import com.toaster.noad.core.model.AccessibilityState
 import com.toaster.noad.core.model.InterceptSource
+import com.toaster.noad.core.service.AccessibilityRecoveryController
+import com.toaster.noad.core.service.AccessibilitySettingsLauncher
 import com.toaster.noad.core.service.AccessibilityStateHolder
 import com.toaster.noad.core.service.ProtectionFlags
+import com.toaster.noad.core.service.SideloadRestrictionController
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -46,6 +52,17 @@ data class HomeUiState(
      * 也可能服务正在运行，但用户在应用内关闭了拦截开关。
      */
     val accessibility: AccessibilityState = AccessibilityState(),
+    /**
+     * Shizuku 已就绪（已授权且探测通道可用），可执行 F2 自动解除。
+     *
+     * 由 [SideloadRestrictionController] 的状态机映射而来，
+     * feature 层不直接接触 core/shizuku（分层约束，方案 §3）。
+     */
+    val shizukuReady: Boolean = false,
+    /** Shizuku 已安装但尚未授权：展示「授权」入口而非「自动解除」 */
+    val shizukuNeedsPermission: Boolean = false,
+    /** F2 解除流程进行中：按钮禁用 + 文案切换，防止重复点击 */
+    val fixingRestricted: Boolean = false,
 )
 
 /**
@@ -66,6 +83,8 @@ class HomeViewModel(
     targetAppRepository: TargetAppRepository,
     logRepository: LogRepository,
     private val settingsRepository: SettingsRepository,
+    private val sideloadRestrictionController: SideloadRestrictionController,
+    private val accessibilityRecoveryController: AccessibilityRecoveryController,
 ) : AndroidViewModel(application) {
 
     private val todayCount = logRepository.observeTodayCount()
@@ -75,13 +94,19 @@ class HomeViewModel(
     private val settings = settingsRepository.settings
     private val accessibilityState = AccessibilityStateHolder.state
 
+    /** Shizuku 支持状态（门面已映射为纯布尔，feature 层不接触 core/shizuku） */
+    private val shizukuSupport = sideloadRestrictionController.support
+
+    /** F2 解除流程防重入标志 */
+    private val fixInFlight = MutableStateFlow(false)
+
     /**
      * 应用内数据（计数 + 排行），5 路以内。
      *
      * Kotlin 的 `combine` 只提供到 5 个 Flow 的类型化重载，
      * 超过即退化为 `combine(vararg)` 的 `Array<Any>` 版本 ——
      * 那样会丢失全部类型信息。因此这里先合并到 5 路，
-     * 再与外部的无障碍状态做二次合并。
+     * 再与外部的无障碍状态、Shizuku 支持状态、解除进行中标志做二次合并。
      */
     private val appData = combine(
         todayCount,
@@ -102,7 +127,9 @@ class HomeViewModel(
     val uiState: StateFlow<HomeUiState> = combine(
         appData,
         accessibilityState,
-    ) { data, a11y ->
+        shizukuSupport,
+        fixInFlight,
+    ) { data, a11y, support, fixing ->
         HomeUiState(
             todayBlocked = data.todayBlocked,
             protectionEnabled = data.protectionEnabled,
@@ -111,6 +138,9 @@ class HomeViewModel(
             isLoading = false,
             topApps = data.topApps,
             accessibility = a11y,
+            shizukuReady = support.ready,
+            shizukuNeedsPermission = support.needsPermission,
+            fixingRestricted = fixing,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -172,6 +202,102 @@ class HomeViewModel(
             // 同步内存镜像，使无障碍服务在事件回调中立即可见
             ProtectionFlags.setAccessibilityEnabled(enabled)
         }
+    }
+
+    /** 发起 Shizuku 授权（结果经 Application 的监听回流刷新状态机与 UI） */
+    fun grantShizukuPermission() {
+        sideloadRestrictionController.grantPermission()
+    }
+
+    /**
+     * 尝试用 Shizuku 自动解除「受限设置」（F2，方案 §6.5.3）。
+     *
+     * 成功（含原本已解除）后**直接打开系统无障碍设置** ——
+     * 侧载用户被挡住的正是这一步；失败则停留本页，
+     * 受限提示卡继续展示手动图文引导。
+     */
+    fun resolveRestrictedSettings() {
+        if (fixInFlight.value) return
+        viewModelScope.launch {
+            fixInFlight.value = true
+            try {
+                when (sideloadRestrictionController.resolve()) {
+                    SideloadRestrictionController.ResolveOutcome.ALREADY_ALLOWED -> {
+                        toast(R.string.shizuku_fix_toast_already)
+                        openAccessibilitySettings()
+                    }
+
+                    SideloadRestrictionController.ResolveOutcome.FIXED -> {
+                        toast(R.string.shizuku_fix_toast_success)
+                        openAccessibilitySettings()
+                    }
+
+                    SideloadRestrictionController.ResolveOutcome.NEEDS_PERMISSION ->
+                        toast(R.string.shizuku_fix_toast_need_permission)
+
+                    SideloadRestrictionController.ResolveOutcome.SHIZUKU_UNAVAILABLE ->
+                        toast(R.string.shizuku_fix_toast_unavailable)
+
+                    SideloadRestrictionController.ResolveOutcome.FAILED ->
+                        toast(R.string.shizuku_fix_toast_failed)
+                }
+            } finally {
+                fixInFlight.value = false
+            }
+        }
+    }
+
+    /**
+     * 用 Shizuku 一键恢复无障碍授权（R12）。
+     *
+     * 背景：激进 ROM 的「一键清理 / 上划清除」按 force-stop 语义处理应用，
+     * 系统随之撤销无障碍授权记录 —— 用户被迫去系统设置重新开启。
+     * 授权记录的恢复需要 shell 权限；Shizuku 就绪时，这里把
+     * 「read-merge-write + 回读验证」的恢复序列变成一次点击。
+     *
+     * 与 [resolveRestrictedSettings] 共用 [fixInFlight] 防重入：
+     * 两者都是 Shizuku 特权操作，不并发执行足以覆盖互斥需求，
+     * 也让按钮禁用逻辑保持单一状态源。
+     */
+    fun restoreAccessibilityAuthorization() {
+        if (fixInFlight.value) return
+        viewModelScope.launch {
+            fixInFlight.value = true
+            try {
+                when (accessibilityRecoveryController.restoreAuthorization()) {
+                    AccessibilityRecoveryController.RestoreOutcome.RESTORED -> {
+                        toast(R.string.shizuku_restore_toast_success)
+                        // 系统监听到设置变化会自动重绑服务，立刻核对一次状态；
+                        // 若有延迟，ON_RESUME 的刷新会兜底纠正 UI
+                        refreshAccessibilityState()
+                    }
+
+                    AccessibilityRecoveryController.RestoreOutcome.ALREADY_PRESENT -> {
+                        toast(R.string.shizuku_restore_toast_already)
+                        refreshAccessibilityState()
+                    }
+
+                    AccessibilityRecoveryController.RestoreOutcome.NEEDS_PERMISSION ->
+                        toast(R.string.shizuku_fix_toast_need_permission)
+
+                    AccessibilityRecoveryController.RestoreOutcome.SHIZUKU_UNAVAILABLE ->
+                        toast(R.string.shizuku_fix_toast_unavailable)
+
+                    AccessibilityRecoveryController.RestoreOutcome.FAILED ->
+                        toast(R.string.shizuku_restore_toast_failed)
+                }
+            } finally {
+                fixInFlight.value = false
+            }
+        }
+    }
+
+    private fun toast(resId: Int) {
+        Toast.makeText(getApplication(), resId, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun openAccessibilitySettings() {
+        AccessibilitySettingsLauncher.openAccessibilitySettings(getApplication())
     }
 
     /** 按来源分解的统计（S1 / S2 / S3 / S4 各自拦截了多少） */

@@ -39,6 +39,17 @@ class LogRepository(private val dao: InterceptLogDao) {
     fun observeTodayCountBySource(source: InterceptSource): Flow<Int> =
         dao.observeCountSinceBySource(startOfToday(), source.name)
 
+    /**
+     * 全量拦截条数（常驻通知的「累计拦截 N 次」数据源）。
+     * 注意计数以 `intercept_log` 表为准 —— 触发容量裁剪后会回落到
+     * 容量上限内，与日志页展示口径保持一致（单一数据源，不做独立累加器）。
+     */
+    fun observeTotalCount(): Flow<Int> = dao.observeTotalCount()
+
+    /** 最近一条拦截记录（常驻通知的「上一条拦截」数据源），无记录时为 null */
+    fun observeLatest(): Flow<InterceptLog?> =
+        dao.observeLatest().map { it?.toDomain() }
+
     fun observeTopBlockedApps(limit: Int = 10): Flow<List<BlockedAppCount>> =
         dao.observeTopBlockedAppsSince(startOfToday(), limit)
 

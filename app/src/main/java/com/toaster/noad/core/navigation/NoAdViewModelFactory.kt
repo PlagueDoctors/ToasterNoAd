@@ -36,6 +36,8 @@ object NoAdViewModelFactory {
                 targetAppRepository = container.targetAppRepository,
                 logRepository = container.logRepository,
                 settingsRepository = container.settingsRepository,
+                sideloadRestrictionController = container.sideloadRestrictionController,
+                accessibilityRecoveryController = container.accessibilityRecoveryController,
             )
         }
         initializer {

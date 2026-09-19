@@ -42,9 +42,20 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.NoAd">
 
+        <!--
+            excludeFromRecents="true"（R10）：上划后台应用列表（最近任务）中
+            不显示本应用。
+
+            - 隐藏的是**任务卡片**，任务本身照常存在于后台：
+              点桌面图标仍回到原界面，服务与无障碍绑定不受影响
+            - 附带收益：后台卡片不存在 → 无法从最近任务划掉/一键清理
+              本应用，与 R9 保活互为补充（但 force-stop 仍不可自启，
+              见 KeepAliveService 的诚实边界）
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:excludeFromRecents="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.NoAd"
             android:windowSoftInputMode="adjustResize">
@@ -118,6 +129,26 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!--
+            ShizukuProvider（R11 / 阶段 F1，方案 §6.3.2 的官方标准声明）。
+
+            Shizuku 运行器通过该 provider 与本应用交换 binder：
+            - authorities 必须为 ${applicationId}.shizuku
+            - exported="true" + INTERACT_ACROSS_USERS_FULL（签名级）：
+              只有 Shizuku 运行器（系统 shell 身份）能访问，第三方应用无法触碰
+            - 单进程应用，multiprocess="false"（与 NoAdApplication 中的
+              enableMultiProcessSupport(false) 对应）
+
+            未安装 Shizuku 时该 provider 静默闲置，全部功能正常（§13.1 可选增强）。
+        -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:enabled="true"
+            android:exported="true"
+            android:multiprocess="false"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
     </application>
 

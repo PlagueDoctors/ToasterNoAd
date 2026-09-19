@@ -12,11 +12,17 @@ import com.toaster.noad.core.data.rules.BuiltinSkipRulesLoader
 import com.toaster.noad.core.data.settings.SettingsRepository
 import com.toaster.noad.core.database.NoAdDatabase
 import com.toaster.noad.core.database.entity.DomainRuleEntity
+import com.toaster.noad.core.service.AccessibilityRecoveryController
 import com.toaster.noad.core.service.AccessibilityStateHolder
 import com.toaster.noad.core.service.AccessibilityWatchdog
 import com.toaster.noad.core.service.ProtectionFlags
+import com.toaster.noad.core.service.SideloadRestrictionController
 import com.toaster.noad.core.service.keepalive.KeepAliveRuntime
 import com.toaster.noad.core.service.keepalive.KeepAliveService
+import com.toaster.noad.core.service.shizuku.AccessibilityAuthorizationRestorer
+import com.toaster.noad.core.service.shizuku.RestrictedSettingsFixer
+import com.toaster.noad.core.service.shizuku.ShizukuAvailabilityHolder
+import com.toaster.noad.core.service.shizuku.ShizukuShellClient
 import com.toaster.noad.core.repository.S1RuleCache
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,6 +30,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import rikka.shizuku.Shizuku
+import rikka.shizuku.ShizukuProvider
 
 /**
  * 手动依赖容器。
@@ -71,6 +79,62 @@ class AppContainer(private val context: Context) {
 
     val settingsRepository: SettingsRepository by lazy {
         SettingsRepository(context)
+    }
+
+    /**
+     * Shizuku UserService 传输层（F2）。
+     * 独立成容器项：状态机（探测）与执行器（解除）共享同一个连接。
+     */
+    val shizukuShellClient: ShizukuShellClient by lazy {
+        ShizukuShellClient(context)
+    }
+
+    /**
+     * Shizuku 可用性状态机（F1，方案 §6.3.3 / §6.3.4）。
+     *
+     * 事件由 NoAdApplication 在 onCreate 注册的三个监听驱动；
+     * 刷新作用域用 [applicationScope] —— 状态的存活期应等于进程，
+     * 与任何界面无关。
+     */
+    val shizukuAvailabilityHolder: ShizukuAvailabilityHolder by lazy {
+        ShizukuAvailabilityHolder(
+            context = context,
+            scope = applicationScope,
+            shell = shizukuShellClient,
+        )
+    }
+
+    /** 侧载「受限设置」解除执行器（F2，方案 §6.5.2） */
+    val restrictedSettingsFixer: RestrictedSettingsFixer by lazy {
+        RestrictedSettingsFixer(shell = shizukuShellClient)
+    }
+
+    /**
+     * 侧载限制解除的 feature 层门面（F2，方案 §6.5.3 + §3 分层约束）。
+     * feature 只消费本类，不接触 core/shizuku 的类型。
+     */
+    val sideloadRestrictionController: SideloadRestrictionController by lazy {
+        SideloadRestrictionController(
+            context = context,
+            shizukuHolder = shizukuAvailabilityHolder,
+            fixer = restrictedSettingsFixer,
+            scope = applicationScope,
+        )
+    }
+
+    /**
+     * 无障碍授权恢复门面（R12）。
+     *
+     * ROM「一键清理」按 force-stop 语义撤销无障碍授权后，
+     * 用户点一下即可恢复授权记录（read-merge-write 保护他人条目），
+     * 不必再跑系统设置。与受限解除（F2）是两个关注点，各自独立成门面。
+     */
+    val accessibilityRecoveryController: AccessibilityRecoveryController by lazy {
+        AccessibilityRecoveryController(
+            context = context,
+            shizukuHolder = shizukuAvailabilityHolder,
+            restorer = AccessibilityAuthorizationRestorer(shell = shizukuShellClient),
+        )
     }
 
     /**
@@ -174,6 +238,26 @@ class NoAdApplication : Application() {
         // 注意 start() 内部只做注册（廉价），真正的状态核对在协程里异步执行，
         // 因此不会拖慢冷启动。
         accessibilityWatchdog.start()
+
+        // Shizuku 绑定生命周期接线（F1，方案 §6.3.3）。
+        //
+        // - enableMultiProcessSupport(false)：单进程应用
+        //   （与 manifest 中 provider 的 multiprocess="false" 对应）
+        // - sticky 监听在注册时若 binder 已存活会**立即在当前线程回调**，
+        //   因此回调体只做轻量的协程启动；pingBinder / 授权核对 / 能力探测
+        //   全部在 IO 协程内完成，不拖慢冷启动主线程
+        // - dead 监听是 §11.2「Shizuku 重启后失效」风险的应对：
+        //   状态归位 → UI 自动回退手动引导，绝不静默假装可用
+        // - 权限结果监听刻意不读 grantResult：由状态机重新核对真实权限，
+        //   避免出现「监听说的已授权」与「实际权限」两套真相
+        ShizukuProvider.enableMultiProcessSupport(false)
+        container.shizukuAvailabilityHolder.let { holder ->
+            Shizuku.addBinderReceivedListenerSticky(holder::onBinderReceived)
+            Shizuku.addBinderDeadListener(holder::onBinderDead)
+            Shizuku.addRequestPermissionResultListener { _, _ ->
+                holder.onPermissionResult()
+            }
+        }
 
         applicationScope.launch {
             initializeDomainRules()

@@ -35,6 +35,14 @@ interface InterceptLogDao {
     @Query("SELECT COUNT(*) FROM intercept_log WHERE timestamp >= :since AND source = :source")
     fun observeCountSinceBySource(since: Long, source: String): Flow<Int>
 
+    /** 全量拦截条数（随容量裁剪变化：trim 后计数回落到容量上限内） */
+    @Query("SELECT COUNT(*) FROM intercept_log")
+    fun observeTotalCount(): Flow<Int>
+
+    /** 最近一条拦截记录；表为空时为 null。LIMIT 1，避免为取首条拉全量列表 */
+    @Query("SELECT * FROM intercept_log ORDER BY timestamp DESC LIMIT 1")
+    fun observeLatest(): Flow<InterceptLogEntity?>
+
     @Query(
         """
         SELECT package_name AS packageName, app_label AS appLabel, COUNT(*) AS count

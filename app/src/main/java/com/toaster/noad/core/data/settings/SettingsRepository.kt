@@ -96,6 +96,19 @@ class SettingsRepository(private val context: Context) {
     val autostart: Flow<Boolean> =
         store.data.map { it[KEY_AUTOSTART] ?: false }
 
+    /**
+     * 常驻通知中是否显示拦截动态（累计拦截次数 + 最近一条拦截）。
+     *
+     * 语义约束：常驻通知本身是保活前台服务的系统强制要求，**不可移除**；
+     * 本开关控制的是通知的**内容** —— 关闭后回退为静态保活文案，
+     * 而不是移除通知（移除 = 关闭保活服务，那是「后台保活」开关的职责）。
+     *
+     * 消费方：[com.toaster.noad.core.service.keepalive.KeepAliveService]
+     * 的通知内容观察者。
+     */
+    val showNotification: Flow<Boolean> =
+        store.data.map { it[KEY_SHOW_NOTIFICATION] ?: true }
+
     suspend fun setProtectionEnabled(enabled: Boolean) {
         store.edit { it[KEY_PROTECTION_ENABLED] = enabled }
     }

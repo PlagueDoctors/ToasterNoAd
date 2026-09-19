@@ -200,10 +200,13 @@ object AccessibilityStateHolder {
             isServiceEnabledInSettings(appContext)
         }.getOrDefault(false)
 
-        // 侧载限制只在 Android 13+ 存在（API 33）
+        // 侧载限制只在 Android 13+ 存在（API 33）。
+        // restrictedSettingCleared 是 F2 解除成功后的进程内记忆（见其 KDoc）：
+        // 下面的保守判定只看「SDK + 是否已启用 + 是否侧载」，无法感知
+        // appop 已被放行，需要这一层覆盖。
         val restricted = runCatching {
             isRestrictedBySideload(appContext, enabledInSettings)
-        }.getOrDefault(false)
+        }.getOrDefault(false) && !restrictedSettingCleared
 
         _state.value = _state.value.copy(
             serviceEnabledInSettings = enabledInSettings,
@@ -223,6 +226,7 @@ object AccessibilityStateHolder {
     /** 仅供测试与调试重置 */
     internal fun resetForTest() {
         _state.value = AccessibilityState()
+        restrictedSettingCleared = false
         clock = { SystemClock.elapsedRealtime() }
     }
 
@@ -250,6 +254,17 @@ object AccessibilityStateHolder {
      */
     internal fun seedSettingsFlagForTest(enabled: Boolean) {
         _state.value = _state.value.copy(serviceEnabledInSettings = enabled)
+    }
+
+    /**
+     * 测试专用：直接写入「受限设置」提示标志。
+     *
+     * 理由同 [seedSettingsFlagForTest]：生产路径只能从 `Settings.Secure`
+     * 与安装来源推断，JVM（无 Robolectric）上拿不到；而「解除成功后
+     * 撤下提示」是用户可见的核心行为，必须可测。
+     */
+    internal fun seedRestrictedFlagForTest(restricted: Boolean) {
+        _state.value = _state.value.copy(restrictedBySideload = restricted)
     }
 
     /**
@@ -318,6 +333,46 @@ object AccessibilityStateHolder {
         val installer = info?.installingPackageName
         installer.isNullOrBlank()
     }.getOrDefault(false)
+
+    /**
+     * F2「受限设置解除成功」的进程内记忆（R11，方案 §6.5）。
+     *
+     * ## 为什么不持久化
+     *
+     * appop `ACCESS_RESTRICTED_SETTINGS` 的放行状态由**系统**持有，
+     * Shizuku 只是在本次安装上把它从 default 改成 allow。
+     * 应用重启后无法在不依赖 Shizuku 的前提下可靠地重新读到该状态
+     * （读它本身就需要 shell 权限），因此这里选择诚实的策略：
+     * **重启后回到保守判定** —— 若限制仍然存在，UI 会重新出现提示卡，
+     * 用户可再次一键解除；若确实已解除，保守判定在
+     * 「已启用 / 未侧载」路径上本就不会误报。
+     *
+     * 进程内记忆已足够覆盖主流程：解除成功 → 直接打开系统设置 →
+     * 授权服务 → 回到首页，全程不经过进程重启。
+     */
+    @Volatile private var restrictedSettingCleared = false
+
+    /**
+     * 记录「受限设置限制已通过 Shizuku 解除」。
+     *
+     * 由 [SideloadRestrictionController.resolve] 在 ALREADY_ALLOWED /
+     * FIXED 两种结果下调用。置位后：
+     *
+     * - [refreshFromSystemSettings] 的保守判定不再覆盖真实结果
+     *   （`&& !restrictedSettingCleared`）
+     * - 若提示卡当前正在展示，立即撤下（UI 即时反馈）
+     *
+     * 撤显用 `copy(restrictedBySideload = false)` 而不是等下一次 refresh：
+     * refresh 依赖 ContentResolver 跨进程查询，时机不可控；而用户刚点完
+     * 按钮，超过一拍才消失就会显得"点了没反应"。
+     */
+    fun markRestrictedSettingCleared() {
+        restrictedSettingCleared = true
+        val current = _state.value
+        if (current.restrictedBySideload) {
+            _state.value = current.copy(restrictedBySideload = false)
+        }
+    }
 
     private const val ANDROID_13 = 33
 }

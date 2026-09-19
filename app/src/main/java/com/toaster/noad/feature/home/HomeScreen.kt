@@ -166,6 +166,12 @@ fun HomeRoute(
                 item {
                     AccessibilityGuideCard(
                         state = uiState.accessibility,
+                        shizukuReady = uiState.shizukuReady,
+                        shizukuNeedsPermission = uiState.shizukuNeedsPermission,
+                        fixInFlight = uiState.fixingRestricted,
+                        onAutoFixRestricted = viewModel::resolveRestrictedSettings,
+                        onGrantShizuku = viewModel::grantShizukuPermission,
+                        onRestoreAccessibility = viewModel::restoreAccessibilityAuthorization,
                         onToggleAppSwitch = {
                             viewModel.setAccessibilityEnabled(
                                 !uiState.accessibility.appSwitchEnabled,
@@ -475,10 +481,33 @@ private fun BlockedAppRow(app: TopBlockedAppItem, modifier: Modifier = Modifier)
  *
  * 每一步都告诉用户「现在处于哪一环、下一步点哪里」，
  * 不出现"请开启无障碍"这种没有可操作信息的话。
+ *
+ * ## F2 侧载受限自动解除（方案 §6.5.3）
+ *
+ * 当检测到受限设置挡路时，卡片按 Shizuku 状态提供三种互斥形态：
+ *
+ * - **就绪**：「自动解除」主按钮（[onAutoFixRestricted]），
+ *   流程进行中禁用并切换文案（[fixInFlight]）；成功后由
+ *   ViewModel 直接打开系统无障碍设置
+ * - **已装未授权**：「授权」入口（[onGrantShizuku]）
+ * - **其余**（未装 Shizuku / 探测未过）：维持手动图文引导，
+ *   不新增按钮 —— 功能缺失不该挤占本就紧张的提示空间
+ *
+ * ## R12 授权恢复
+ *
+ * ROM「一键清理」按 force-stop 语义撤销无障碍授权后，用户被迫重跑设置。
+ * 在「去系统设置」分支旁提供一键恢复（[onRestoreAccessibility]，
+ * 需 Shizuku 就绪）：read-merge-write 保护其他应用条目，回读验证后才报成功。
  */
 @Composable
 private fun AccessibilityGuideCard(
     state: AccessibilityState,
+    shizukuReady: Boolean,
+    shizukuNeedsPermission: Boolean,
+    fixInFlight: Boolean,
+    onAutoFixRestricted: () -> Unit,
+    onGrantShizuku: () -> Unit,
+    onRestoreAccessibility: () -> Unit,
     onToggleAppSwitch: () -> Unit,
     onOpenSystemSettings: () -> Unit,
     onRefresh: () -> Unit,
@@ -592,6 +621,29 @@ private fun AccessibilityGuideCard(
                             Text(stringResource(R.string.a11y_action_recheck))
                         }
                     }
+
+                    // Shizuku 授权恢复（R12）：ROM「一键清理」按 force-stop
+                    // 撤销授权后的一键修复。只在 Shizuku 就绪时展示；
+                    // 与「自动解除」共用 fixInFlight 防重入。
+                    if (shizukuReady) {
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = onRestoreAccessibility,
+                            enabled = !fixInFlight,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                        ) {
+                            Text(
+                                stringResource(
+                                    if (fixInFlight) {
+                                        R.string.shizuku_restore_running
+                                    } else {
+                                        R.string.shizuku_restore_action
+                                    },
+                                ),
+                            )
+                        }
+                    }
                 }
 
                 // 其余情况：提供手动开关
@@ -606,7 +658,13 @@ private fun AccessibilityGuideCard(
                 }
             }
 
-            // 侧载受限提示：仅在确实检测到受限且尚未授权时展示
+            // 侧载受限提示：仅在确实检测到受限且尚未授权时展示。
+            //
+            // 三种动作形态互斥（F2，方案 §6.5.3）：
+            // - Shizuku 就绪 → 「自动解除」主入口（成功后由 ViewModel
+            //   直接打开系统无障碍设置，即"成功：直接开启"）
+            // - 已装未授权 → 「授权」入口
+            // - 其余（未装 Shizuku / 探测未过）→ 维持手动图文，不新增按钮
             if (state.restrictedBySideload && !state.serviceRunning) {
                 Spacer(Modifier.height(12.dp))
                 Surface(
@@ -627,6 +685,35 @@ private fun AccessibilityGuideCard(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onErrorContainer,
                         )
+
+                        if (shizukuReady) {
+                            Spacer(Modifier.height(10.dp))
+                            Button(
+                                onClick = onAutoFixRestricted,
+                                enabled = !fixInFlight,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(10.dp),
+                            ) {
+                                Text(
+                                    stringResource(
+                                        if (fixInFlight) {
+                                            R.string.shizuku_fix_running
+                                        } else {
+                                            R.string.shizuku_fix_action
+                                        },
+                                    ),
+                                )
+                            }
+                        } else if (shizukuNeedsPermission) {
+                            Spacer(Modifier.height(10.dp))
+                            OutlinedButton(
+                                onClick = onGrantShizuku,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(10.dp),
+                            ) {
+                                Text(stringResource(R.string.shizuku_grant_permission))
+                            }
+                        }
                     }
                 }
             }

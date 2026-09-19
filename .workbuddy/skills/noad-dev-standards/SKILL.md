@@ -728,7 +728,71 @@ v1 没有任何内置导入路径，存量行必然是用户手工产生的，
 | 解析器测试 | `BuiltinRulesLoaderTest` | `BuiltinSkipRulesLoaderTest` |
 
 
-## 十三、已知待修正项（不要沿用其写法）
+## 十三、Shizuku 通道与工具层教训（R11：F1+F2；R12：授权恢复）
+
+### 传输层定稿（不要重开讨论）
+
+- **UserService + 自有极简 AIDL（单方法 `exec(in String[])`）+ `cmd appops` 字符串命令**。
+  官方已宣布移除 `newProcess`；框架 AIDL 方法事务码按声明序分配会静默漂移；
+  op 数值跨版本漂移 —— `cmd appops` 按字符串名解析同时规避两者。
+  **禁止硬编码 op 数值（如 119）**，只用常量 `ACCESS_RESTRICTED_SETTINGS`
+- `ShellCommandUserService`：**限时等待再读输出**（先读会在命令不退出时永久阻塞）；
+  绝不抛异常，失败以文本标记并入输出由解析层按 UNKNOWN 降级
+- `ShizukuShellClient`：`bindUserService` + `CompletableDeferred`（8s 超时）；
+  服务器死亡 `reset()` 归位重绑
+- 状态机 `ShizukuState`（**包级声明**，门面要 import）：
+  `Unavailable / NeedsPermission / Probing / Ready(canSetAppOps)`；
+  **能力探测诚实原则：`Ready` 只携带已实现且实打验证过的能力项**
+  （F2 仅 `canSetAppOps`，用只读 `cmd appops get` 实测），不做「常量 false 冒充已探测」
+- Shizuku API 速记：服务器版本查询是 `Shizuku.getVersion()`
+  （**没有** `getServerVersion`）；aidl 开关在 AGP 9.x 用
+  `buildFeatures { aidl = true }`
+
+### 可见性与分层（违反即编译错）
+
+- `AppContainer` 公开属性持有 `ShizukuShellClient` / `RestrictedSettingsFixer`，
+  因此这两个类**不能标 `internal`**（Kotlin 规则：public 签名暴露 internal 类型直接报错，
+  门面构造器同理）—— 由此 `RestrictedSettingsOps` 也必须公开（fixer 公开方法返回它的嵌套类型）
+- feature 层只 import `SideloadRestrictionController`（core/service 门面），
+  零 `core/service/shizuku` 引用（§3 分层约束）；未装 Shizuku 时一切功能完整
+- 受限判定闭环：解除成功调 `AccessibilityStateHolder.markRestrictedSettingCleared()`
+  做进程内覆盖（`&& !restrictedSettingCleared`），**刻意不持久化** ——
+  appop 真实状态由系统持有，重启回保守判定：限制仍在提示卡重现、可再解除
+- 成功判定 = **回读验证**（set 不报错 ≠ 生效）；变体链 包级 → `--uid`；
+  成功后直接打开系统无障碍设置（§6.5.3）
+
+### 🔴 工具层教训：同一文件的多个编辑绝不能放进同一并行批次
+
+R11 曾向同一文件在同一消息批次发多个 Edit，结果**随机互相覆盖**（部分编辑
+静默丢失：toml 版本声明、imports、字段、函数体各有殃及），下游表现为
+各种看似无关的编译错误，排查成本远高于省下的轮次。
+
+**铁律：每个文件每轮最多一个 Edit；只有不同文件才可并行。**
+修复受影响文件前必须先 read/grep 确认真实状态，不能凭"上次编辑成功"的回执推断。
+
+### R12：授权恢复（restoreAuthorization）的契约
+
+- **read-merge-write 是铁律**：`enabled_accessibility_services` 是全局共享设置，
+  绝不整体覆盖（会抹掉其他应用的无障碍条目）。顺序：
+  `settings get` → `parseEntries`（容忍 `"null"` 字面量/空白/脏分隔符）→
+  `mergeEnabledServices`（**已存在条目零改写**，含大小写变体——不规范化、不追加）→
+  `settings put` → `settings get` **回读验证**（set 不报错 ≠ 生效，
+  SELinux/ROM 静默拒绝是真实失败形态）→ 另写 `accessibility_enabled=1`
+- **R8 禁止表的边界**：禁止的是「周期性后台自动写授权记录」；
+  用户显式点击的一次性恢复不在此列。后台静默周期写依然禁止
+- **可测性模式**：命令执行收敛为注入函数
+  `restore(exec: suspend (List<String>) -> String?, flat)`——生产传 `shell::exec`，
+  测试传记录调用顺序的假 exec；决策层零 Android 依赖（对照 S1RuleCache 收 Flow）
+- **门面拆分**：`AccessibilityRecoveryController`（恢复授权）与
+  `SideloadRestrictionController`（解除受限）平行独立——两个关注点不共名；
+  Restorer 同样不能 internal（AppContainer 公开属性持有）
+- **诊断尾行语义**：`diagnosticTail("null")` 返回字符串 `"null"`，空串才返回 null
+- 🔴 命令断言按**序位**：read 与 write 命令第 4 参都是键名，
+  `.first { it[3] == key }` 会永远先匹配到 read —— 用 `commands[1]` 按调用顺序断言
+- 🔴 `--rerun-tasks` 与配置缓存不兼容（秒退，告警校验无效）。强制重编译姿势：
+  `find app/src/main/java -name "*.kt" -exec touch {} +` 后 compile + `grep "^w: "`
+
+## 十四、已知待修正项（不要沿用其写法）
 
 以下是当前代码库里客观存在的"临时/占位/违规"实现，**新增代码不要模仿**，改动相关
 文件时顺手修正。
@@ -767,7 +831,7 @@ v1 没有任何内置导入路径，存量行必然是用户手工产生的，
 > 处理原则：修一项就删一项，不要在此长期堆积。若某条已确认不打算做，
 > 也要先判定为「不做」并写清原因，而不是让它无限期挂在"待修正"里。
 
-## 十四、官方参考
+## 十五、官方参考
 
 - Android 架构指南 — https://developer.android.com/topic/architecture
 - Android 应用模块化 — https://developer.android.com/topic/modularization

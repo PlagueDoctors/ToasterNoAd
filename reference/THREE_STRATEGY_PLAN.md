@@ -2171,6 +2171,200 @@ R9 解决的是另一层、且完全独立的问题：**应用进程本身被杀
 > 双开关组合行为、电池豁免页跳转），交付标准同上。
 
 
+### 隐身与感知增强（R10，2026-09-19）—— 最近任务隐藏 + 常驻拦截动态
+
+用户两项直接需求，均落在既有架构上，无新增组件层：
+
+#### 1. 最近任务列表中隐藏（`excludeFromRecents`）
+
+`MainActivity` 加 `android:excludeFromRecents="true"`：
+
+- 隐藏的是**任务卡片**，任务本身照常存在于后台 —— 点桌面图标仍
+  回到原界面，无障碍绑定与保活服务不受影响
+- 附带收益：后台卡片不存在 → 无法从最近任务划掉/一键清理本应用，
+  与 R9 保活互为补充（force-stop 诚实边界不变）
+- 刻意做成清单静态声明而非运行时切换：运行时 `AppTask.setExcludeFromRecents`
+  只对当前任务生效且语义易变，静态声明行为确定
+
+#### 2. 常驻通知显示拦截动态（无横幅）
+
+R9 的保活前台服务**本来就挂着常驻通知**（系统强制、不可移除），
+本项把它的内容从静态文案升级为**实时拦截动态**：
+
+- 标题：`已拦截 N 次广告`；正文：`最近拦截：哔哩哔哩 · 开屏广告`
+- 数据链：`InterceptLogDao` 新增 `observeTotalCount()`（全量 COUNT）
+  与 `observeLatest()`（`LIMIT 1`）→ `LogRepository` 暴露 Flow →
+  `KeepAliveService` 三路 `combine`（开关 + 计数 + 最新记录）→
+  `notify()` 覆盖同 ID
+- **无横幅的保证是结构性的**：渠道为 R9 既定的 `IMPORTANCE_LOW`，
+  通知更新（`notify` 同 ID 覆盖）在低优先级渠道上永不触发 heads-up，
+  只出现在下拉通知栏 —— 不依赖任何「禁止横幅」的补丁式配置
+- `InterceptLog` 已冗余存储中文 `appLabel` 与 `adType.label`，
+  通知侧无需联表或 PackageManager 解析
+
+设计决策：
+
+- **计数以 `intercept_log` 表为准，不做独立累加器**：与日志页口径
+  单一数据源，`clear()` 后同步归零；代价是触发容量裁剪（默认上限）
+  后计数回落 —— 换取「通知计数 ≡ 日志页可见条数」的一致性，
+  避免出现两个互相矛盾的数字
+- **「拦截动态」开关接活**：设置里原本死置的 `showNotification`
+  （曾标注「拦截时发送通知提醒」，无任何消费方）被赋予真实语义 ——
+  控制常驻通知是否显示动态内容；关闭回退为静态保活文案。
+  常驻通知本身不可移除（FGS 系统要求），移除通知 = 关闭「后台保活」
+- **通知更新与权限**：Android 13+ 未授予通知权限时跳过投递
+  （FGS 通知在任务管理区仍可见，不崩溃）；权限已在开启保活时请求
+- **首帧静态文案**：`startForeground` 必须同步完成，观察者流首次
+  发射毫秒级到达后再刷新 —— 与粘性重启的「乐观恢复」同一哲学：
+  先诚实展示已知状态，异步数据到达即纠正
+
+决策层 `KeepAliveNotificationContent`（纯函数，JVM 可测）锁死四分支：
+开关关闭 → 静态；计数 0 → 「暂无拦截记录」；计数 > 0 且记录可用 →
+动态文案；**计数 > 0 但最新记录缺失**（COUNT 与 LIMIT 1 是两次独立
+快照，容量裁剪/并发交错可出现）→ 标题保计数、正文回退「暂无」。
+应用名空串兜底「未知应用」（`ResId` value class 区分资源引用参数
+与 Int 参数，避免与拦截次数的 Int 冲突）。
+
+#### 验证证据（R10）
+
+```
+./gradlew :app:compileDebugKotlin → BUILD SUCCESSFUL, 0 error, 0 warning
+./gradlew :app:testDebugUnitTest  → BUILD SUCCESSFUL
+249 tests / 15 test classes, 0 skipped, 0 failed, 0 errors
+  （新增 KeepAliveNotificationContentTest 6 个：四分支 + 两条防御分支）
+```
+
+实机验证点（由用户执行）：最近任务中不出现 NoAd；拦截一次广告后
+常驻通知计数与「最近拦截」实时更新且无横幅无声音；关闭「拦截动态」
+后通知回退静态文案。
+
+
+### 阶段 F 前置交付（R11，2026-09-19）—— F1 Shizuku 基础设施 + F2 侧载限制解除
+
+对应 §10 item 18/19。要解决的问题：侧载用户在 Android 13+ 被「受限设置」
+挡在无障碍授权之外（§6.5）—— 用户连开关都看不到，S1 入口完全死路。
+本交付实现「探测 → 授权 → 一键解除 → 回到授权」闭环，全部降级路径保留。
+
+#### F1：依赖接入 + Binder 基础设施
+
+- **依赖**：`dev.rikka.shizuku:{api,provider,aidl}:13.1.5`；
+  Manifest 声明官方 `ShizukuProvider`（authorities `${applicationId}.shizuku`、
+  exported=true、multiprocess=false）；Application 侧
+  `ShizukuProvider.enableMultiProcessSupport(false)`。
+- **传输层决策（对 §6.5.2 示意的有意识偏差，理由见 §13.4）**：
+  `UserService + 自有极简 AIDL（单方法 exec(in String[])）+ cmd appops 字符串命令`。
+  - 框架 AIDL 方法事务码按声明序分配，跨版本漂移会**静默打错方法** ——
+    比 op 数值漂移更隐蔽；自有 AIDL 永不漂移
+  - `cmd appops` 按 op 字符串名解析，免疫数值漂移（§6.5.2 警告的直接落实，
+    **禁止硬编码 op 数值 119**）
+  - aidl 插件在 AGP 9.x 用标准 `buildFeatures { aidl = true }`（已验证可解析）
+- **`ShellCommandUserService`**（shell 身份独立进程）：无状态 exec；
+  限时等待再读输出（10s 超时后 destroyForcibly），绝不抛异常，
+  失败以文本标记并入输出（timeout/error），由解析层按 UNKNOWN 降级
+- **`ShizukuShellClient`**（主进程绑定）：`bindUserService` +
+  `CompletableDeferred` 把异步连接变成可等待挂起点（8s 超时）；
+  服务器死亡时 `reset()` 归位，下次使用前重新绑定
+- **`ShizukuAvailabilityHolder` 状态机**：
+  `Unavailable / NeedsPermission / Probing / Ready(canSetAppOps)`。
+  事件驱动：Application onCreate 注册三监听（sticky binder-received /
+  binder-dead / 权限结果）转发，holder 不自订阅；Mutex 串行化刷新；
+  `getVersion() <= 0` 视同未就绪；任何一步异常落回 Unavailable
+- **能力探测诚实原则**：`Ready` 只携带 F2 所需的 `canSetAppOps` 一项 ——
+  用只读 `cmd appops get` 实打验证 shell 通道 + op 名识别
+  （输出含 "Bad operation"/"Unknown operation" → 报不可用）。
+  其余 Capabilities 项随 F3-F6 落地逐项扩展，
+  **不做「常量 false 冒充已探测」**
+
+#### F2：侧载「受限设置」解除
+
+分层（自下而上；feature 层零 core/shizuku 引用，§3 合规）：
+
+- **`RestrictedSettingsOps`** 纯决策层（JVM 可测，无 Android 依赖）：
+  op 名常量 `ACCESS_RESTRICTED_SETTINGS`；`parseOpState` 严格按
+  「op 名 + 冒号」前缀解析（取 `;` 前首个模式词；allow→ALLOWED，
+  其余一律 NOT_ALLOWED/UNKNOWN）；命令变体链 包级 → `--uid`；
+  **成功判定 = 回读验证**（set 不报错 ≠ 生效，只有 get 回读到 allow 才算 Fixed）
+- **`RestrictedSettingsFixer`** 执行器：
+  初始 get → 尝试计划（set → 同变体回读验证）→ decideOutcome（带末行诊断）
+- **`SideloadRestrictionController`**（core/service 门面）：
+  状态机映射为 `ShizukuSupport(ready, needsPermission)` 布尔 StateFlow；
+  `ResolveOutcome` 五态终态；成功（AlreadyAllowed/Fixed）时接管
+  `AccessibilityStateHolder.markRestrictedSettingCleared()`
+- **UI 接线**：HomeUiState 增 `shizukuReady / shizukuNeedsPermission /
+  fixingRestricted`（combine 扩为 4 路，5 流上限内）；受限提示卡三形态互斥：
+  就绪→「自动解除」（进行中禁用+换文案）、已装未授权→「授权」、
+  其余→保持手动图文不新增按钮。成功后直接打开系统无障碍设置
+  （§6.5.3「成功：直接开启」）
+
+**受限状态闭环**：R8 的保守判定（SDK≥33 && 未启用 && 侧载）无法感知
+appop 已放行 → 解除成功后 `restrictedSettingCleared` 进程内覆盖
+（`&& !restrictedSettingCleared`），**不持久化** —— appop 真实状态由系统
+持有，重启后回保守判定：限制仍在则提示卡重现、可再次解除；
+若已真实解除，保守判定在「已启用/未侧载」路径上本就不会误报。
+
+#### 验证证据（R11）
+
+```
+./gradlew testDebugUnitTest compileDebugKotlin → BUILD SUCCESSFUL
+compileDebugKotlin: 0 error, 0 warning（app/src 下无任何 ^w:）
+276 tests / 17 test classes, 0 failures, 0 errors, 0 skipped
+  （新增 RestrictedSettingsOpsTest 24 条【命令构造/输出解析/决策，
+    含 op 数值守护测试】、AccessibilityStateHolderRestrictedTest 3 条
+    【解除撤显/未受限无副作用/不复活】）
+```
+
+实机验证点（由用户执行）：Android 13+ 侧载设备安装并启动 Shizuku →
+首页受限卡先显示「授权 Shizuku」→ 授权后变为「自动解除」→ 点击后
+toast + 直接落到系统无障碍设置且开关可见可开；返回首页受限提示不再出现；
+杀掉 Shizuku 后卡片自动回退手动图文引导（无崩溃、无死按钮）。
+
+
+### 授权恢复（R12，2026-09-19）—— Shizuku 一键恢复无障碍授权
+
+**问题**（实机反馈）：激进 ROM 的「一键清理 / 上划清除」按 force-stop
+语义处理应用，系统随之撤销无障碍授权记录 —— 用户被迫去系统设置重新
+开启。这是系统行为，应用侧无法阻止（与 R9「force-stop 诚实边界」
+同源），只能事后恢复；而恢复恰好需要 shell 权限，R11 通道直接覆盖。
+
+**实现**（与 F2 同构的三层）：
+
+- 纯层 `AccessibilityRestoreOps`：`settings get/put secure` 命令构造 +
+  解析（容忍 `null` 字面量 / 脏分隔符 / 空白）+ `mergeEnabledServices`
+  （**read-merge-write，保护其他应用的无障碍条目**）+ 恢复序列
+  （read → merge → put → put master → read 回读验证）。
+  `restore(exec, flat)` 以注入的 exec 函数接收命令执行 ——
+  序列逻辑 JVM 全覆盖（ScriptedExec 记录调用顺序与分支）
+- 执行器 `AccessibilityAuthorizationRestorer`：纯层到 shell 通道的
+  薄绑定，无独立逻辑
+- 门面 `AccessibilityRecoveryController`（与 SideloadRestrictionController
+  平行的独立门面 —— 解除受限与恢复授权是两个关注点，不共名撒谎）：
+  NeedsPermission / Unavailable 预检在先，不让用户对着「失败」文案
+  猜原因
+- UI：引导卡「去系统设置」分支旁的恢复按钮（Shizuku 就绪时显示，
+  与 F2 共用 `fixInFlight` 防重入）；五态 toast；成功后立刻刷新状态，
+  系统监听到设置变化自动重绑服务
+
+**对 R8「禁止」表的边界修订**：当年否决的是「周期性后台自动写授权
+记录」（adb 12h 限制 / 影响面不可控）。本次交付改写其适用边界 ——
+**用户显式点击、read-merge-write 保护他人条目、回读验证的一次性恢复
+不在此列；后台静默周期写依然禁止。**
+
+#### 验证证据（R12）
+
+```
+./gradlew testDebugUnitTest compileDebugKotlin → BUILD SUCCESSFUL
+compileDebugKotlin: 0 error, 0 warning（app/src 下无任何 ^w:）
+307 tests / 18 test classes, 0 failures, 0 errors, 0 skipped
+  （新增 AccessibilityRestoreOpsTest 31 条【解析脏形态/大小写合并/
+    命令构造/序列顺序与条件跳过/静默拒绝防线】）
+```
+
+实机验证点（由用户执行）：无障碍被 ROM 清理撤销后（首页显示未开启），
+装好并启动 Shizuku → 首页出现「用 Shizuku 恢复无障碍授权」→ 点击后
+toast + 系统自动重连无障碍服务，无需再去系统设置；未装/未启动
+Shizuku 时按钮不出现，回退手动图文引导。
+
+
 ### 阶段 C：网络层公共模块
 8. `VpnArbitrator`（让位仲裁）—— **最高优先**
 9. `DnsPacketParser`（`DomainRuleEngine` 已完成）

@@ -1,16 +1,26 @@
 package com.toaster.noad.core.service.keepalive
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import androidx.core.content.ContextCompat
+import com.toaster.noad.NoAdApplication
 import com.toaster.noad.R
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.launch
 
 /**
  * 应用进程保活前台服务（specialUse 类型）。
@@ -49,6 +59,9 @@ import com.toaster.noad.R
  *   的安全设计，不是缺陷。只能等用户手动打开应用
  * - 前台服务**必须**挂常驻通知（系统强制），使用低优先级静默渠道，
  *   不发声、不弹横幅
+ * - 常驻通知的内容由 [KeepAliveNotificationContent] 决定（纯决策层）：
+ *   默认实时展示「累计拦截次数 + 最近一条拦截」，且仅在通知栏更新、
+ *   不弹横幅；用户可通过「拦截动态」开关回退为静态保活文案
  *
  * ## 为什么不在这里 cancel 闹钟
  *
@@ -59,11 +72,25 @@ import com.toaster.noad.R
  */
 class KeepAliveService : Service() {
 
+    /**
+     * 服务级协程作用域：承载拦截动态的观察者流。
+     *
+     * 生命周期与服务实例绑定 —— onDestroy 时取消，避免服务销毁后
+     * Room Flow 仍在后台做无效查询与通知刷新。
+     */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         createChannel()
+        observeInterceptionStats()
+    }
+
+    override fun onDestroy() {
+        scope.cancel()
+        super.onDestroy()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -100,7 +127,16 @@ class KeepAliveService : Service() {
      * 常量本身在 API 34 才引入）。
      */
     private fun enterForeground() {
-        val notification = buildNotification()
+        // 首帧用静态文案：观察者流的首次发射在毫秒级之后到达，
+        // 此刻拉起前台不能等任何异步数据（startForeground 必须同步完成）
+        val notification = buildNotification(
+            KeepAliveNotificationContent.resolve(
+                showStats = false,
+                totalCount = 0,
+                latestAppLabel = null,
+                latestAdTypeLabel = "",
+            ),
+        )
         if (Build.VERSION.SDK_INT >= ANDROID_14) {
             startForeground(
                 NOTIFICATION_ID,
@@ -113,19 +149,70 @@ class KeepAliveService : Service() {
     }
 
     /**
-     * 构建常驻通知。
+     * 观察拦截动态并实时刷新常驻通知。
+     *
+     * 三路合流：「拦截动态」开关 + 全量拦截数 + 最近一条记录。
+     * Room 的 Flow 在 `intercept_log` 表变化时自动重发 —— 每次新拦截
+     * 入库后通知即更新，无需任何手动触发。刷新走 `notify()` 覆盖
+     * 同 ID 通知，渠道为 `IMPORTANCE_LOW`，**不会弹横幅、不发声**，
+     * 只在下拉通知栏中呈现 —— 这正是本需求的表述约束。
+     *
+     * 决策逻辑全部在 [KeepAliveNotificationContent]（纯函数，单测覆盖）；
+     * 此处只做格式化与投递。
+     */
+    private fun observeInterceptionStats() {
+        val container = NoAdApplication.containerOf(this)
+        scope.launch {
+            combine(
+                container.settingsRepository.showNotification,
+                container.logRepository.observeTotalCount(),
+                container.logRepository.observeLatest(),
+            ) { showStats, totalCount, latest ->
+                KeepAliveNotificationContent.resolve(
+                    showStats = showStats,
+                    totalCount = totalCount,
+                    latestAppLabel = latest?.appLabel,
+                    latestAdTypeLabel = latest?.adType?.label ?: "",
+                )
+            }.collect { content ->
+                if (canPostNotifications()) {
+                    getSystemService(NotificationManager::class.java)
+                        ?.notify(NOTIFICATION_ID, buildNotification(content))
+                }
+            }
+        }
+    }
+
+    /** Android 13+ 未授予通知权限时更新会被静默丢弃，跳过无效投递 */
+    private fun canPostNotifications(): Boolean =
+        Build.VERSION.SDK_INT < ANDROID_13 ||
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * 构建/更新常驻通知。
      *
      * `getText` / `getString` 直接使用继承自 Context 的实现 ——
      * 不要定义同名私有函数，会遮蔽继承方法并造成自递归。
      */
-    private fun buildNotification(): Notification =
+    private fun buildNotification(content: KeepAliveNotificationContent.Content): Notification =
         Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(getText(R.string.keep_alive_notification_title))
-            .setContentText(getText(R.string.keep_alive_notification_text))
+            .setContentTitle(getText(content.titleRes, content.titleArgs))
+            .setContentText(getText(content.textRes, content.textArgs))
             .setOngoing(true)
             .setShowWhen(false)
             .build()
+
+    /** 把 [ResId] 参数解析为字符串，其余参数（如拦截次数）原样交给格式化 */
+    private fun getText(resId: Int, args: List<Any>): CharSequence =
+        if (args.isEmpty()) {
+            getText(resId)
+        } else {
+            getString(resId, *args.map { if (it is ResId) getText(it.id) else it }.toTypedArray())
+        }
 
     /**
      * 创建低优先级通知渠道。
@@ -151,6 +238,7 @@ class KeepAliveService : Service() {
         private const val TAG = "NoAdKeepAlive"
         private const val CHANNEL_ID = "keep_alive"
         private const val NOTIFICATION_ID = 1001
+        private const val ANDROID_13 = 33
         private const val ANDROID_14 = 34
 
         /**

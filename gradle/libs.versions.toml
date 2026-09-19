@@ -19,6 +19,8 @@ coroutines = "1.9.0"
 json = "20240303"
 # kotlinx-serialization：由 room-migration 间接使用，需要显式对齐版本（见 app/build.gradle.kts）
 serialization = "1.8.1"
+# ---- Shizuku（阶段 F：可选增强，方案 §6.3.1）----
+shizuku = "13.1.5"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -54,6 +56,10 @@ androidx-datastore-preferences = { group = "androidx.datastore", name = "datasto
 json = { group = "org.json", name = "json", version.ref = "json" }
 # ---- 序列化（仅用于版本对齐，无直接代码依赖）----
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "serialization" }
+# ---- Shizuku（阶段 F）----
+shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuku" }
+shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizuku" }
+shizuku-aidl = { group = "dev.rikka.shizuku", name = "aidl", version.ref = "shizuku" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

@@ -40,6 +40,10 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        // Shizuku UserService 的自有 AIDL（IShellCommandService，F2）。
+        // 方案 §6.3.1 预警过 AGP 9.x（built-in Kotlin）下的配置方式需要验证：
+        // 标准声明即可编译通过，AIDL → Java 桩生成与 Kotlin 编译模式无关。
+        aidl = true
     }
     sourceSets {
         // 让单元测试可访问 Room 导出的 schema（迁移测试用）
@@ -75,6 +79,14 @@ dependencies {
 
     // ---- DataStore ----
     implementation(libs.androidx.datastore.preferences)
+
+    // ---- Shizuku（阶段 F：可选增强）----
+    // api：Shizuku 门面（pingBinder / 权限 / UserService 绑定）
+    // provider：ShizukuProvider（manifest 声明所需）
+    // aidl：官方推荐随 api/provider 一并引入（方案 §6.3.1）
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
+    implementation(libs.shizuku.aidl)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

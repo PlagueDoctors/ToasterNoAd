@@ -121,4 +121,29 @@
     <string name="keep_alive_channel_description">显示保活服务的运行状态，不发出提醒</string>
     <string name="keep_alive_notification_title">NoAd 正在后台运行</string>
     <string name="keep_alive_notification_text">保持拦截进程存活 · 可在设置中关闭</string>
+
+    <!-- 常驻通知的拦截动态内容（R10）：无横幅、仅通知栏 -->
+    <string name="keep_alive_status_title_active">已拦截 %1$d 次广告</string>
+    <string name="keep_alive_status_text_latest">最近拦截：%1$s · %2$s</string>
+    <string name="keep_alive_status_text_none">暂无拦截记录</string>
+    <string name="keep_alive_status_unknown_app">未知应用</string>
+    <string name="intercept_status_toggle_title">拦截动态</string>
+    <string name="intercept_status_toggle_subtitle">在常驻通知中显示累计拦截与最近一条拦截</string>
+
+    <!-- Shizuku 自动解除受限设置（R11 / 阶段 F2，方案 §6.5）。
+         手动图文（a11y_hint_restricted_message）保留：
+         自动解除失败/未装 Shizuku 时仍是唯一出路。 -->
+    <string name="shizuku_fix_action">用 Shizuku 自动解除限制</string>
+    <string name="shizuku_fix_running">正在解除…</string>
+    <string name="shizuku_fix_toast_success">受限设置已解除，正在打开无障碍设置</string>
+    <string name="shizuku_fix_toast_already">限制原本已解除，正在打开无障碍设置</string>
+    <string name="shizuku_fix_toast_need_permission">请先在 Shizuku 中授权</string>
+    <string name="shizuku_fix_toast_unavailable">Shizuku 未运行或未就绪</string>
+    <string name="shizuku_fix_toast_failed">自动解除失败，请按上方提示手动操作</string>
+    <string name="shizuku_grant_permission">授权 Shizuku</string>
+    <string name="shizuku_restore_action">用 Shizuku 恢复无障碍授权</string>
+    <string name="shizuku_restore_running">正在恢复…</string>
+    <string name="shizuku_restore_toast_success">授权已恢复，服务将自动重新连接</string>
+    <string name="shizuku_restore_toast_already">授权记录仍在，若服务未运行请稍候或重启应用</string>
+    <string name="shizuku_restore_toast_failed">恢复失败，请到系统设置手动开启</string>
 </resources>
