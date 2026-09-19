@@ -129,12 +129,28 @@ class HomeViewModel(
 
     init {
         // 从系统设置刷新一次真实授权状态。
-        // 系统不提供"无障碍服务状态变化"的广播，
-        // 因此每次进入首页时主动核对一次，这是最可靠的时机。
+        //
+        // 这里只是"首屏尽早拿到状态"，不是完整的刷新机制：
+        // - 后台时机（息屏/解锁/授权变化）由 AccessibilityWatchdog 的广播覆盖
+        // - 回到前台（含从设置页返回）由 HomeScreen 的 ON_RESUME 覆盖
         refreshAccessibilityState()
     }
 
-    /** 重新核对系统无障碍设置中的授权状态 */
+    /**
+     * 重新核对系统无障碍设置中的授权状态。
+     *
+     * ## 这不只是"读一下状态"
+     *
+     * 它同时承担**发现服务断开**的职责。Android 不发"服务断开"广播，
+     * 只能靠核对 `Settings.Secure` 与内存中的 `serviceRunning` 对齐来反推。
+     * 核对之后：
+     *
+     * - `isDisconnectedButAuthorized` 为真 → 服务被系统解绑，授权还在，
+     *   **用户不需要做任何事**，界面对此如实展示即可
+     * - `isNotAuthorized` 为真 → 确实没授权，需要引导用户去设置
+     *
+     * 两者在 UI 上的文案与动作完全不同，因此必须区分。
+     */
     fun refreshAccessibilityState() {
         viewModelScope.launch(Dispatchers.IO) {
             // 用 application 上下文：Settings.Secure 查询是跨进程调用，

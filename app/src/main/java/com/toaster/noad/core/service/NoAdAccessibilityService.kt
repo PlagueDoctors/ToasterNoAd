@@ -8,10 +8,12 @@ import android.view.accessibility.AccessibilityEvent
 import com.toaster.noad.NoAdApplication
 import com.toaster.noad.core.engine.ui.ClickExecutor
 import com.toaster.noad.core.model.AdType
+import com.toaster.noad.core.model.DisconnectReason
 import com.toaster.noad.core.model.InterceptSource
 import com.toaster.noad.core.service.event.EventProcessor
 import com.toaster.noad.core.service.event.InterceptRecord
 import com.toaster.noad.core.service.event.ProcessOutcome
+import com.toaster.noad.core.service.event.SkipDiagnostics
 import com.toaster.noad.core.service.event.SkipReason
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -87,8 +89,18 @@ class NoAdAccessibilityService : AccessibilityService() {
             eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
 
-            // 100ms 是官方示例的常用值：更小会增加回调频率但提升及时性。
-            // 取 100ms 是"广告出现到被点掉"与"回调开销"的折中。
+            // 0 = 不做事件合并，每次变化都回调。
+            //
+            // ## 为什么从 100ms 改成 0
+            //
+            // 100ms 的合并意味着"跳过按钮出现"这一事件可能被延迟最多 100ms
+            // 才送达 —— 而 100ms 正好是**人眼可察觉交互延迟的下限**。
+            // 早期设 100ms 是为了控制回调开销，但那时每个事件都要遍历节点树；
+            // 现在 `EventProcessor` 有了廉价预筛（第 2.5 道闸），
+            // 绝大多数事件在做任何 IPC 之前就被丢弃，回调本身的成本已经很低。
+            //
+            // 因此把延迟换回来：及时性对 S1 更重要 ——
+            // 开屏广告只有 3–5 秒，晚 100ms 可能就错过点击窗口。
             notificationTimeout = EVENT_TIMEOUT_MS
 
             flags = flags or AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
@@ -106,11 +118,18 @@ class NoAdAccessibilityService : AccessibilityService() {
             ruleCache = container.s1RuleCache,
             clickExecutor = ClickExecutor(this),
             scope = ioScope,
+            // 点击在后台线程执行，届时重新取根节点。
+            // `rootInActiveWindow` 可在任意线程调用，无障碍 API 只要求
+            // 调用发生在服务存活期间，不要求主线程。
+            rootProvider = { rootInActiveWindow },
             onIntercepted = ::persistIntercept,
         )
 
         AccessibilityStateHolder.onConnected()
         AccessibilityStateHolder.refreshFromSystemSettings(this)
+
+        // 重置诊断状态：避免用户看到上一个服务会话的陈旧记录
+        SkipDiagnostics.onServiceConnected()
 
         log("S1 服务已连接")
     }
@@ -127,7 +146,12 @@ class NoAdAccessibilityService : AccessibilityService() {
 
         // 总开关关闭时直接忽略：用户意图优先于任何优化。
         // 读取的是内存中的 volatile 标记，不是 DataStore 查询。
-        if (!ProtectionFlags.accessibilityEnabled) return
+        if (!ProtectionFlags.accessibilityEnabled) {
+            // 记录到诊断，否则用户会看到"服务在跑但什么都没发生"
+            // 而无法区分是"没开开关"还是"规则没命中"。
+            SkipDiagnostics.recordDisabled(event.packageName?.toString())
+            return
+        }
 
         val packageName = event.packageName?.toString()
 
@@ -143,7 +167,9 @@ class NoAdAccessibilityService : AccessibilityService() {
         }
 
         val outcome = runCatching {
-            processor.process(event) { rootInActiveWindow }
+            // 传入 ioScope 作为点击投递目标：点击绝不在本回调（主线程）内执行。
+            // 详见 EventProcessor.process 的文档说明。
+            processor.process(event, { rootInActiveWindow }, ioScope)
         }.getOrElse { error ->
             // 事件处理中的任何异常都不应让服务崩溃 ——
             // 无障碍服务崩溃会被系统静默重启，用户只会看到"拦截失灵"
@@ -184,16 +210,27 @@ class NoAdAccessibilityService : AccessibilityService() {
     /**
      * 服务被解绑（用户在系统设置中关闭、或系统回收）。
      *
-     * 必须在此更新状态，否则 UI 会一直显示"运行中"。
+     * ## 这是"断开"最主要的观察点
+     *
+     * Android 不提供解绑的原因，`onUnbind` 是应用能拿到的最早信号。
+     * 必须在这里记录断开时间与原因，否则 UI 只能显示一句"没在跑"，
+     * 用户无法判断该等待自愈还是该去设置里检查。
+     *
+     * 返回值保持 `super.onUnbind()`（默认 `false`），不去拦截重新绑定的
+     * 语义 —— 服务被重新连接是**期望行为**，没有任何理由阻止它。
      */
     override fun onUnbind(intent: Intent?): Boolean {
-        AccessibilityStateHolder.onDisconnected()
+        AccessibilityStateHolder.onDisconnected(DisconnectReason.SYSTEM_UNBOUND)
+        SkipDiagnostics.onServiceDisconnected()
         log("S1 服务已解绑")
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
-        AccessibilityStateHolder.onDisconnected()
+        // 不覆盖 onUnbind 已记录的原因：两者会先后触发，
+        // 后者往往只是前者引发的清理动作，真正的断开原因在前者。
+        AccessibilityStateHolder.onDisconnected(DisconnectReason.SERVICE_DESTROYED)
+        SkipDiagnostics.onServiceDisconnected()
         ioScope.cancel()
         super.onDestroy()
     }
@@ -251,10 +288,12 @@ class NoAdAccessibilityService : AccessibilityService() {
         /**
          * 事件回调节流窗口。
          *
-         * 100ms 的含义：系统在 100ms 内的同类事件会被合并，
-         * 显著降低回调次数，同时对"广告出现"的响应延迟感知不到。
+         * 0 = 系统不合并事件，每次变化都回调。
+         * 早期用 100ms 来降低回调频率，但那会在"跳过按钮出现"上引入
+         * 最多 100ms 的可感知延迟；现在预筛承担了降频职责，
+         * 回调本身已足够廉价，因此把及时性换回来。
          */
-        const val EVENT_TIMEOUT_MS = 100L
+        const val EVENT_TIMEOUT_MS = 0L
 
         const val INITIAL_LABEL_CACHE = 8
     }

@@ -116,7 +116,8 @@ object BuiltinSkipRulesLoader {
 
             val packageName = appObj.optString(KEY_PACKAGE).trim()
             if (packageName.isEmpty()) {
-                // 无包名的规则无法路由到任何应用，整组丢弃
+                // 无包名的规则无法路由到任何应用，整组丢弃。
+                // 注意 `"*"`（通用规则伪包名）是**合法**值，不会被此判断拦下。
                 skipped++
                 continue
             }
@@ -212,11 +213,17 @@ object BuiltinSkipRulesLoader {
      *
      * 未显式声明时按定位方式给出合理默认：
      * - `VIEW_ID` 天然是全串比较（见 `UiMatcher.matchByViewId`），模式不生效
-     * - 文本类定位默认**精确**：内置规则宁可漏拦，不可误点
+     * - 文本类定位默认**精确**：未声明模式时宁可漏拦，不可误点
+     *
+     * 注意内置规则文件中**绝大多数文本规则会显式写 `PREFIX`** ——
+     * 因为开屏跳过按钮几乎都带倒计时（`"跳过 1"`），
+     * 默认的 `EXACT` 会必然落空。默认值保守、显式声明激进，
+     * 这样"忘了写模式"的后果是漏拦而非误点，方向是安全的。
      */
     private fun parseMatchMode(raw: String, targetType: TargetType): MatchMode {
         val explicit = when (raw.trim().uppercase()) {
             "EXACT" -> MatchMode.EXACT
+            "PREFIX", "STARTS_WITH", "STARTSWITH" -> MatchMode.PREFIX
             "CONTAINS" -> MatchMode.CONTAINS
             "REGEX" -> MatchMode.REGEX
             else -> null

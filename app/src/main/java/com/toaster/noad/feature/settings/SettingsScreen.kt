@@ -1,5 +1,16 @@
 package com.toaster.noad.feature.settings
 
+import android.Manifest
+import android.annotation.SuppressLint
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -21,12 +32,21 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.toaster.noad.R
@@ -49,6 +69,27 @@ fun SettingsRoute(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val settings = uiState.settings
 
+    val context = LocalContext.current
+
+    // 通知权限（Android 13+）：保活服务必须挂常驻通知，开启保活时顺手请求。
+    // 拒绝不阻断保活 —— FGS 照常运行，仅通知不可见，无需二次引导。
+    // 实现为普通 lambda 而非 @Composable 函数：调用点在 onToggle 回调
+    // （非组合作用域）内，只有 lambda 属性能在那里被合法引用。
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* 授权结果无需处理，拒绝即静默 */ }
+    val requestNotificationPermissionIfNeeded: () -> Unit = {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
     androidx.compose.material3.Scaffold(
         modifier = Modifier.fillMaxSize(),
         topBar = {
@@ -70,8 +111,32 @@ fun SettingsRoute(
                     SectionTitle("通用")
                     SettingsGroupCard {
                         SettingToggleRow(
+                            title = stringResource(R.string.keep_alive_toggle_title),
+                            subtitle = stringResource(
+                                if (settings.keepAliveEnabled) {
+                                    R.string.keep_alive_toggle_subtitle_on
+                                } else {
+                                    R.string.keep_alive_toggle_subtitle_off
+                                },
+                            ),
+                            checked = settings.keepAliveEnabled,
+                            onToggle = {
+                                // SettingToggleRow 的回调无参，新值 = 当前值取反；
+                                // 仅在「新状态为开启」时请求通知权限。
+                                val enabled = !settings.keepAliveEnabled
+                                viewModel.setKeepAliveEnabled(enabled)
+                                if (enabled) requestNotificationPermissionIfNeeded()
+                            },
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                        BatteryExemptionRow()
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                        SettingToggleRow(
                             title = "开机自启动",
-                            subtitle = "设备重启后自动恢复拦截",
+                            // 不能写「恢复拦截」：无障碍拦截由系统授权模型
+                            // 在重启后自动重连，与本开关无关。
+                            // 本开关的真实职责只是恢复前台服务保活。
+                            subtitle = stringResource(R.string.keep_alive_autostart_subtitle),
                             checked = settings.autostart,
                             onToggle = { viewModel.setAutostart(!settings.autostart) },
                         )
@@ -199,6 +264,11 @@ private fun accessibilitySubtitle(state: AccessibilityState): String = when {
     state.serviceRunning ->
         "服务已授权，但应用内开关未开启"
 
+    // 已授权但服务实例被系统解绑 —— 与"没授权"是两回事，必须分开说。
+    // 写成同一句会让用户多跑一趟设置，而其实他什么都不用做。
+    state.isDisconnectedButAuthorized ->
+        stringResource(R.string.a11y_status_enabled_not_connected)
+
     state.appSwitchEnabled ->
         "需要在系统设置中授权无障碍服务"
 
@@ -213,6 +283,70 @@ private fun SectionTitle(text: String) {    Text(
         color = MaterialTheme.colorScheme.primary,
         modifier = Modifier.padding(vertical = 8.dp),
     )
+}
+
+/**
+ * 电池优化豁免入口行。
+ *
+ * 豁免后本应用进入官方「FGS 后台启动豁免名单」，且在激进省电 ROM
+ * （如厂商一键清理）下保活链的存活概率显著提升 —— 这是 R9 保活的
+ * 关键加固项，但状态由系统掌管，应用内开关只能展示、不能写入。
+ */
+@SuppressLint("BatteryLife")
+@Composable
+private fun BatteryExemptionRow() {
+    val context = LocalContext.current
+    var exempted by remember { mutableStateOf(isIgnoringBatteryOptimizations(context)) }
+
+    // ON_RESUME 刷新：用户点了本行去系统页授权，返回时状态才真正变化。
+    // 用 LifecycleEventObserver 而非 LaunchedEffect 的原因同 HomeScreen ——
+    // 后者只在首次组合时执行一次，感知不到「从系统设置返回」。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                exempted = isIgnoringBatteryOptimizations(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    ListItem(
+        headlineContent = { Text(stringResource(R.string.keep_alive_battery_title)) },
+        supportingContent = {
+            Text(
+                stringResource(
+                    if (exempted) {
+                        R.string.keep_alive_battery_exempted
+                    } else {
+                        R.string.keep_alive_battery_not_exempted
+                    },
+                ),
+            )
+        },
+        modifier = Modifier.clickable {
+            // 优先拉起针对本应用的精准授权对话框（需
+            // REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 权限，Manifest 已声明）；
+            // 少数 ROM 移除了该对话框，失败时退回系统豁免列表页。
+            runCatching {
+                context.startActivity(
+                    Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                        .setData(Uri.parse("package:${context.packageName}")),
+                )
+            }.onFailure {
+                runCatching {
+                    context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                }
+            }
+        },
+    )
+}
+
+/** 查询本应用是否已列入电池优化豁免名单。系统服务异常时按「未豁免」处理。 */
+private fun isIgnoringBatteryOptimizations(context: Context): Boolean {
+    val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+    return powerManager?.isIgnoringBatteryOptimizations(context.packageName) == true
 }
 
 @Composable

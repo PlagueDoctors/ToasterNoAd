@@ -79,11 +79,65 @@ enum class SkipRuleSource(
 }
 
 /**
+ * 通用规则的伪包名。
+ *
+ * 广告 SDK 的跳过按钮 id 在所有接入该 SDK 的应用中相同（如穿山甲的
+ * `tt_splash_skip_btn`、快手的 `ksad_splash_circle_skip_view`），
+ * 但按钮 id 的**包名前缀**随宿主而异。用伪包名承载这类跨应用规则，
+ * 使其作用于任意已纳管应用，无需逐应用重复登记。
+ *
+ * 使用位置（**必须保持一致**）：
+ * - `builtin_skip_rules.json` 中的 `"package": "*"` 条目
+ * - [com.toaster.noad.core.repository.S1RuleCache] 的快照构建与查询
+ *
+ * 安全性：通用规则同样受"应用必须被用户纳管"约束 ——
+ * 用户没勾选的应用，通用规则也不会作用于它。
+ */
+const val GLOBAL_RULE_PACKAGE: String = "*"
+
+/**
+ * 定位值前缀，表示按 viewId **后缀**匹配。
+ *
+ * 用法：`"*tt_splash_skip_btn"` 可匹配
+ * `com.byted.pangle:id/tt_splash_skip_btn`（SDK 自有资源）
+ * 与 `com.cainiao.wireless:id/tt_splash_skip_btn`（宿主覆写资源）。
+ *
+ * 定义在 model 层而非 `UiMatcher` 内部：规则文件编写者与规则页
+ * 都需要知道这个约定，放在匹配器里会让它在 UI 层不可见。
+ */
+const val VIEW_ID_SUFFIX_PREFIX: String = "*"
+
+/**
  * 文本匹配方式。
+ *
+ * ## 为什么需要 [PREFIX]
+ *
+ * 开屏广告的「跳过」按钮**几乎都带倒计时**，真机抓包实证（B站）：
+ *
+ * ```
+ * tv.danmaku.bili:id/count_down  →  text = "跳过 1"
+ * ```
+ *
+ * 这类文案的正确刻画是「**以『跳过』开头**且总长度很短」：
+ *
+ * - 用 [EXACT]（`"跳过" == "跳过 1"`）→ **必然落空**，这是本应用曾完全失效的直接原因
+ * - 用 [CONTAINS]（`"跳过 1".contains("跳过")`）→ 能命中，
+ *   但也会命中正文里的「跳过此步可在设置中重新开启」等引导文案
+ * - 用 [PREFIX] → 既命中带倒计时的按钮，又不会命中正文（正文不以「跳过」开头）
+ *
+ * 该模式对应李跳跳规则语法中的 `+` 前缀修饰符
+ * （官方文档：「+检测到 表示匹配以检测到开头的文字」）。
  */
 enum class MatchMode {
     /** 完全相等 */
     EXACT,
+
+    /**
+     * 前缀匹配（忽略大小写与首尾空白）。
+     *
+     * 专用于「跳过 1」「跳过广告 5s」这类**带动态后缀**的按钮文案。
+     */
+    PREFIX,
 
     /** 包含子串 */
     CONTAINS,

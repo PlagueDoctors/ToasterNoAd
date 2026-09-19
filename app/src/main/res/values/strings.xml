@@ -50,12 +50,30 @@
     <string name="a11y_card_title">无障碍拦截</string>
     <string name="a11y_status_running">运行中</string>
     <string name="a11y_status_not_enabled">未开启</string>
-    <string name="a11y_status_enabled_not_connected">已授权，等待生效</string>
+    <string name="a11y_status_enabled_not_connected">已授权，服务暂时断开</string>
     <string name="a11y_action_open_settings">去开启</string>
     <string name="a11y_action_enable">开启无障碍拦截</string>
+    <string name="a11y_action_recheck">重新检查</string>
     <string name="a11y_hint_restricted_title">系统限制了此设置</string>
     <string name="a11y_hint_restricted_message">Android 13 及以上版本会限制从浏览器等渠道安装的应用开启无障碍服务。若在「已下载的应用」中找不到 NoAd，请点击右上角菜单选择「允许受限设置」后重试。</string>
     <string name="a11y_hint_steps_title">开启步骤</string>
+
+    <!--
+        服务断开提示（已授权但当前未连接）。
+
+        文案要点：必须让用户知道「不用重新授权」。Android 的无障碍是授权模型，
+        系统在息屏/切后台时会解绑服务实例，但设置里的开关仍是开着的 ——
+        这是正常行为，不是权限被撤销。若文案写成"权限已关闭"，
+        用户会反复跑进设置确认，那是纯粹的误导。
+    -->
+    <string name="a11y_disconnect_title">服务已暂时断开</string>
+    <string name="a11y_disconnect_message">系统在息屏、切换应用或内存紧张时会释放无障碍服务，这是正常现象，设置里的开关仍然开着，不需要重新授权。系统通常会自动重新连接；若长时间未恢复，可点下方按钮前往设置确认开关状态。</string>
+    <string name="a11y_disconnect_reason">断开原因：%1$s</string>
+    <string name="a11y_disconnect_time">已于 %1$s 断开</string>
+    <string name="a11y_disconnect_time_just_now">刚刚断开</string>
+    <string name="a11y_disconnect_elapsed_minutes">%1$d 分钟前断开</string>
+    <string name="a11y_disconnect_elapsed_hours">%1$d 小时前断开</string>
+    <string name="a11y_disconnect_action_settings">前往设置检查</string>
     <string name="a11y_hint_steps_message">1. 在系统设置中找到「已下载的服务」或「已安装的应用」\n2. 找到「NoAd 广告拦截」\n3. 打开开关并确认授权</string>
 
     <!-- 跳过规则管理 -->
@@ -90,4 +108,17 @@
     <string name="settings_domain_blacklist">域名黑名单</string>
     <string name="settings_domain_whitelist">域名白名单</string>
     <string name="settings_domain_whitelist_hint">%1$d 条（优先于黑名单）</string>
+
+    <!-- 后台保活（R9） -->
+    <string name="keep_alive_toggle_title">后台保活</string>
+    <string name="keep_alive_toggle_subtitle_on">常驻运行 · 进程被杀后自动重启</string>
+    <string name="keep_alive_toggle_subtitle_off">进程可能被系统回收，拦截可能中断</string>
+    <string name="keep_alive_battery_title">电池优化豁免</string>
+    <string name="keep_alive_battery_exempted">已豁免 · 系统不会为省电杀掉本应用</string>
+    <string name="keep_alive_battery_not_exempted">未豁免 · 激进省电 ROM 上保活可能失效，建议开启</string>
+    <string name="keep_alive_autostart_subtitle">设备重启后恢复后台保活</string>
+    <string name="keep_alive_channel_name">后台保活</string>
+    <string name="keep_alive_channel_description">显示保活服务的运行状态，不发出提醒</string>
+    <string name="keep_alive_notification_title">NoAd 正在后台运行</string>
+    <string name="keep_alive_notification_text">保持拦截进程存活 · 可在设置中关闭</string>
 </resources>

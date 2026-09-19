@@ -4,10 +4,14 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.toaster.noad.core.data.repository.RuleRepository
 import com.toaster.noad.core.data.repository.TargetAppRepository
+import com.toaster.noad.core.model.GLOBAL_RULE_PACKAGE
 import com.toaster.noad.core.model.MatchMode
 import com.toaster.noad.core.model.SkipRule
 import com.toaster.noad.core.model.SkipRuleSource
 import com.toaster.noad.core.model.TargetType
+import com.toaster.noad.core.service.event.SkipDiagnostics
+import com.toaster.noad.core.service.event.SkipDiagnosticsState
+import com.toaster.noad.core.service.event.SkipReason
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -21,12 +25,16 @@ import kotlinx.coroutines.launch
  * @param groups 按应用分组的规则列表（已是过滤后的结果）
  * @param totalRules 全部规则数（不受搜索影响），用于顶部摘要
  * @param totalApps 覆盖的应用数（不受搜索影响）
+ * @param globalRules 通用规则条数（伪包名 `"*"`，作用于任意已纳管应用）
+ * @param diagnostics S1 实时诊断（绕开被 ROM 抑制的 logcat）
  */
 data class RulesUiState(
     val query: String = "",
     val groups: List<RuleGroup> = emptyList(),
     val totalRules: Int = 0,
     val totalApps: Int = 0,
+    val globalRules: Int = 0,
+    val diagnostics: DiagnosticsItem = DiagnosticsItem.EMPTY,
     val isLoading: Boolean = true,
 ) {
     /** 是否处于"搜索引擎无结果"状态（与"一条规则都没有"不同） */
@@ -36,6 +44,57 @@ data class RulesUiState(
     /** 是否完全没有任何规则 */
     val isEmpty: Boolean
         get() = !isLoading && totalRules == 0
+}
+
+/**
+ * 诊断信息的展示模型。
+ *
+ * ## 为什么必须有这个视图
+ *
+ * 实测设备的 ROM 把 `log.tag.NoAdAccessibility` 设为 Silent，
+ * 应用日志完全不可见。用户报告"没效果"时，若只能回答
+ * 「请连 adb 看日志」，排障就卡死了。
+ *
+ * 因此把引擎的判定结果直接呈现在规则页 —— 用户自己就能看出卡在哪一步。
+ */
+data class DiagnosticsItem(
+    /** 事件最终归属的应用包名 */
+    val packageName: String?,
+    /** 引擎给出的结论（中文，直接可读） */
+    val summary: String,
+    /** 该应用当时可用的规则条数。为 0 是"规则没加载"的强信号 */
+    val ruleCount: Int,
+    /** 后续该做什么（仅在能给出明确动作时非空） */
+    val advice: String?,
+    /** 是否已经收到过任何事件 */
+    val hasReceivedEvent: Boolean,
+    /** 本次会话累计事件数 / 点击数 */
+    val totalEvents: Int,
+    val totalClicks: Int,
+    /** 最近一次事件占用主线程的毫秒数 */
+    val lastCostMs: Long = 0L,
+    /** 本次会话单次事件处理的最大耗时（毫秒） */
+    val maxCostMs: Long = 0L,
+) {
+    /**
+     * 是否存在可感知的主线程卡顿。
+     *
+     * 判据用 `maxCostMs` 而非 `lastCostMs`：偶发尖峰同样会让用户
+     * 感到"有时卡一下"，只看最近一次会漏掉。
+     */
+    val isSlow: Boolean get() = maxCostMs > SkipDiagnosticsState.FRAME_BUDGET_MS
+
+    companion object {
+        val EMPTY = DiagnosticsItem(
+            packageName = null,
+            summary = "尚未收到任何界面事件。请确认无障碍服务已授权，然后打开任意应用试试。",
+            ruleCount = 0,
+            advice = null,
+            hasReceivedEvent = false,
+            totalEvents = 0,
+            totalClicks = 0,
+        )
+    }
 }
 
 /**
@@ -94,6 +153,7 @@ data class RuleItem(
         get() = when {
             targetType == TargetType.VIEW_ID || targetType == TargetType.COORDINATE -> null
             matchMode == MatchMode.EXACT -> "精确"
+            matchMode == MatchMode.PREFIX -> "前缀"
             matchMode == MatchMode.CONTAINS -> "包含"
             else -> "正则"
         }
@@ -119,8 +179,9 @@ class RulesViewModel(
         ruleRepository.observeRules(),
         targetAppRepository.observeTargetApps(),
         queryFlow,
-    ) { rules, targetApps, query ->
-        buildState(rules, targetApps, query)
+        SkipDiagnostics.state,
+    ) { rules, targetApps, query, diagnostics ->
+        buildState(rules, targetApps, query, diagnostics)
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
@@ -151,6 +212,7 @@ class RulesViewModel(
         rules: List<SkipRule>,
         targetApps: List<com.toaster.noad.core.model.TargetApp>,
         query: String,
+        diagnostics: SkipDiagnosticsState,
     ): RulesUiState {
         val managedPackages = targetApps.mapTo(HashSet(targetApps.size)) { it.packageName }
 
@@ -175,8 +237,15 @@ class RulesViewModel(
             .map { (packageName, groupRules) ->
                 RuleGroup(
                     packageName = packageName,
-                    appLabel = labelByPackage[packageName] ?: packageName,
-                    managed = packageName in managedPackages,
+                    appLabel = if (packageName == GLOBAL_RULE_PACKAGE) {
+                        GLOBAL_GROUP_LABEL
+                    } else {
+                        labelByPackage[packageName] ?: packageName
+                    },
+                    // 通用规则组不参与"是否纳管"的标注：
+                    // 它作用于任意已纳管应用，本身不是一个应用。
+                    managed = packageName == GLOBAL_RULE_PACKAGE ||
+                        packageName in managedPackages,
                     rules = groupRules
                         .sortedWith(
                             // 内置优先（用户需要看到"系统已覆盖哪些"），
@@ -188,21 +257,98 @@ class RulesViewModel(
                         .map(SkipRule::toItem),
                 )
             }
-            .sortedBy { it.appLabel }
+            // 通用规则组固定置顶：它决定了所有应用的兜底能力，
+            // 排在应用组之间会让人以为它只对某个应用生效
+            .sortedWith(
+                compareByDescending<RuleGroup> { it.packageName == GLOBAL_RULE_PACKAGE }
+                    .thenBy { it.appLabel },
+            )
 
         return RulesUiState(
             query = query,
             groups = groups,
-            // 摘要始终反映全量，不随搜索变化 —— 否则用户会以为规则被删了
+            // 摘要始终反映全量，不随搜索变化 —— 否则用户会以为规则被删了。
+            // 通用规则计入 totalRules 但不计入 totalApps（它不是"一个应用"）。
             totalRules = rules.size,
-            totalApps = rules.mapTo(HashSet()) { it.packageName }.size,
+            totalApps = rules.asSequence()
+                .map { it.packageName }
+                .filter { it != GLOBAL_RULE_PACKAGE }
+                .distinct()
+                .count(),
+            globalRules = rules.count { it.packageName == GLOBAL_RULE_PACKAGE },
+            diagnostics = diagnostics.toItem(labelByPackage),
             isLoading = false,
         )
     }
 
     private companion object {
         const val STOP_TIMEOUT_MS = 5_000L
+
+        /** 通用规则组在列表中的显示名 */
+        const val GLOBAL_GROUP_LABEL = "通用规则（适用于所有已纳管应用）"
     }
+}
+
+/**
+ * 诊断状态 → 展示模型。
+ *
+ * 把「引擎结论 → 用户可读文案 + 可执行动作」的翻译集中在这里，
+ * 避免 Composable 里堆 when 分支。
+ */
+private fun SkipDiagnosticsState.toItem(labelByPackage: Map<String, String>): DiagnosticsItem {
+    if (!hasReceivedEvent) return DiagnosticsItem.EMPTY
+
+    val appName = lastPackageName?.let { labelByPackage[it] ?: it }
+
+    val (summary, advice) = when {
+        // 总开关未开 / 服务状态类描述
+        lastReason == null && lastOutcome != null -> lastOutcome to null
+
+        lastReason == SkipReason.APP_NOT_MANAGED ->
+            "最近事件来自「${appName ?: "未知应用"}」，但该应用**未被纳管**，事件被丢弃。" to
+                "去「应用管理」页勾选该应用"
+
+        lastReason == SkipReason.NO_RULE_FOR_PACKAGE ->
+            "最近事件来自「${appName ?: "未知应用"}」，该应用已纳管但**没有任何可用规则**。" to
+                "该应用不在内置规则覆盖范围内，可在本页为其新增规则"
+
+        lastReason == SkipReason.ACTIVITY_MISMATCH ->
+            "最近事件来自「${appName ?: "未知应用"}」，但规则的界面限定与当前界面不匹配。" to
+                "检查相关规则的 activity 限定是否过窄"
+
+        lastReason == SkipReason.NO_NODE_MATCH ->
+            "最近事件来自「${appName ?: "未知应用"}」（可用规则 $availableRuleCount 条），" +
+                "遍历了界面但**没有任何节点命中规则**。" to
+                "该应用的跳过按钮可能已改版，需要更新规则定位值"
+
+        lastReason == SkipReason.PRE_FILTERED ->
+            "最近事件来自「${appName ?: "未知应用"}」，事件自带的信息不可能匹配任何规则，" +
+                "已**在遍历界面前丢弃**。" to null
+
+        lastReason == SkipReason.NO_ROOT_NODE || lastReason == SkipReason.EMPTY_NODE_TREE ->
+            "最近事件来自「${appName ?: "未知应用"}」，但**读不到界面节点树**。" to
+                "可能是系统权限限制或界面正在切换，可稍后重试"
+
+        lastReason == SkipReason.IRRELEVANT_EVENT ->
+            "最近事件来自「${appName ?: "未知应用"}」，事件类型与拦截无关，正常跳过。" to null
+
+        lastReason == SkipReason.UNKNOWN_PACKAGE ->
+            "最近事件没有携带包名，无法判断归属。" to null
+
+        else -> (lastOutcome ?: "已收到事件，等待下一次判定") to null
+    }
+
+    return DiagnosticsItem(
+        packageName = lastPackageName,
+        summary = summary,
+        ruleCount = availableRuleCount,
+        advice = advice,
+        hasReceivedEvent = true,
+        totalEvents = totalEvents,
+        totalClicks = totalClicks,
+        lastCostMs = lastCostMs,
+        maxCostMs = maxCostMs,
+    )
 }
 
 /**

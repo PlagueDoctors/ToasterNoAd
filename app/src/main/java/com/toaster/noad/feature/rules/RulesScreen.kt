@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Rule
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.MonitorHeart
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -130,6 +131,7 @@ private fun RulesScreen(
 
                 else -> RuleList(
                     groups = uiState.groups,
+                    diagnostics = uiState.diagnostics,
                     onToggle = onToggle,
                     onRequestDelete = { pendingDeleteId = it },
                 )
@@ -162,6 +164,7 @@ private fun RulesScreen(
 @Composable
 private fun RuleList(
     groups: List<RuleGroup>,
+    diagnostics: DiagnosticsItem,
     onToggle: (Long, Boolean) -> Unit,
     onRequestDelete: (Long) -> Unit,
 ) {
@@ -170,12 +173,149 @@ private fun RuleList(
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        // 诊断卡片置顶：用户看不到效果时的第一个问题就是"到底卡在哪"，
+        // 把它埋在列表末尾等于没做
+        item(key = DIAGNOSTICS_CARD_KEY) {
+            DiagnosticsCard(diagnostics)
+        }
+
         items(items = groups, key = { it.packageName }) { group ->
             AppRuleCard(
                 group = group,
                 onToggle = onToggle,
                 onRequestDelete = onRequestDelete,
             )
+        }
+    }
+}
+
+/**
+ * S1 实时匹配诊断卡片。
+ *
+ * ## 为什么不用 Snackbar / Toast
+ *
+ * 诊断信息需要**反复对照规则列表**阅读（"规则数 0 → 去看内置规则在不在"），
+ * 瞬时提示会消失，用户不得不反复操作复现。
+ *
+ * ## 配色语义
+ *
+ * 只有三种状态，且必须互斥可辨：
+ * - 尚未收到事件 → 中性（`surfaceContainerHigh`）
+ * - 已收到事件 → 正常（`secondaryContainer`）
+ * - 已点击成功   → 成功（`tertiaryContainer`）
+ *
+ * 不用红色：诊断卡片出现红色会让用户以为应用坏了，
+ * 而"没命中规则"是**正常的待排查状态**，不是故障。
+ */
+@Composable
+private fun DiagnosticsCard(item: DiagnosticsItem) {
+    val container = when {
+        !item.hasReceivedEvent -> MaterialTheme.colorScheme.surfaceContainerHigh
+        item.totalClicks > 0 -> MaterialTheme.colorScheme.tertiaryContainer
+        else -> MaterialTheme.colorScheme.secondaryContainer
+    }
+    val content = when {
+        !item.hasReceivedEvent -> MaterialTheme.colorScheme.onSurface
+        item.totalClicks > 0 -> MaterialTheme.colorScheme.onTertiaryContainer
+        else -> MaterialTheme.colorScheme.onSecondaryContainer
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = container),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.MonitorHeart,
+                    contentDescription = null,
+                    tint = content,
+                    modifier = Modifier.size(18.dp),
+                )
+                Text(
+                    text = "匹配诊断",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = content,
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = "事件 ${item.totalEvents} · 点击 ${item.totalClicks}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = content,
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            Text(
+                text = item.summary,
+                style = MaterialTheme.typography.bodyMedium,
+                color = content,
+            )
+
+            // 逐事件耗时：这是判断"启动应用卡一下"是否由本应用造成的直接证据。
+            // 只在已收到事件时展示，否则会显示无意义的 0ms。
+            if (item.hasReceivedEvent) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = buildString {
+                        append("单次处理耗时：最近 ${item.lastCostMs}ms")
+                        if (item.maxCostMs > item.lastCostMs) append(" · 峰值 ${item.maxCostMs}ms")
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = content.copy(alpha = COST_TEXT_ALPHA),
+                )
+                if (item.isSlow) {
+                    // 用弱化的提示语而非报错口吻：轻度超标是正常的，
+                    // 夸大其词会让用户以为应用坏了。
+                    Text(
+                        text = "峰值超过一帧预算（16ms），可能造成轻微卡顿",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = content.copy(alpha = COST_TEXT_ALPHA),
+                    )
+                }
+            }
+
+            // 规则数为 0 是"规则根本没生效"的强信号，单独强调
+            if (item.hasReceivedEvent && item.ruleCount == 0) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "⚠ 该应用可用规则为 0 条。若内置规则应覆盖它，请确认版本已更新到含内置规则库的构建。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = content,
+                )
+            }
+
+            item.advice?.let { advice ->
+                Spacer(Modifier.height(8.dp))
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = DIAGNOSTICS_SURFACE_ALPHA),
+                ) {
+                    Text(
+                        text = "下一步：$advice",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                    )
+                }
+            }
+
+            item.packageName?.let { pkg ->
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = pkg,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = content,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }
@@ -348,3 +488,22 @@ private fun SourceBadge(isBuiltin: Boolean) {
 
 /** 无待删除项的哨兵值。规则 id 恒为正，因此 -1 不会与真实 id 冲突 */
 private const val NO_PENDING_DELETE = -1L
+
+/** 诊断卡片在 LazyColumn 中的稳定 key。它不来自数据源，故用一个不可能与包名冲突的字符串 */
+private const val DIAGNOSTICS_CARD_KEY = "__diagnostics__"
+
+/**
+ * 诊断卡片内层提示框的透明度。
+ *
+ * 卡片底色随状态变化（中性/次要/第三），内层框必须能浮起来又不喧宾夺主。
+ * 取 0.35 是实测下深色主题里既能分辨边界、又不与正文抢对比度的值。
+ */
+private const val DIAGNOSTICS_SURFACE_ALPHA = 0.35f
+
+/**
+ * 耗时行文字相对卡片正文的透明度。
+ *
+ * 取 0.8：它比正文弱（是补充信息），但必须比"下一步"提示更清晰 ——
+ * 这是用户判断"卡顿是不是我造成的"时唯一要看的数据。
+ */
+private const val COST_TEXT_ALPHA = 0.8f

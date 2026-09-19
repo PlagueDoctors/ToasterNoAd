@@ -1,5 +1,6 @@
 package com.toaster.noad.feature.home
 
+import android.os.SystemClock
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -78,8 +79,18 @@ fun HomeRoute(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val blockedBySource by viewModel.blockedBySource.collectAsStateWithLifecycle()
 
-    // 从系统设置返回时重新核对授权状态。
-    // 系统没有提供"无障碍服务被开关"的广播，因此只能在回到前台时主动查询。
+    // 回到前台时重新核对服务连接状态。
+    //
+    // ## 为什么这里还需要它（明明已经有自愈监听器了）
+    //
+    // [com.toaster.noad.core.service.AccessibilityWatchdog] 负责**后台**的自愈：
+    // 息屏、解锁、授权变化都会触发核对。但用户"从系统设置页返回"这一时机
+    // 它感知不到 —— 从设置返回时屏幕既没亮起也没解锁，广播不会发。
+    //
+    // 两层配合，覆盖全部需要刷新的时机：
+    // - 后台：息屏 / 解锁 / 授权变化（Watchdog 的广播）
+    // - 前台：从设置页返回（本处的 ON_RESUME）
+    //
     // 用 LifecycleEventObserver 而非 LaunchedEffect 的原因：
     // 后者只在首次进入组合时执行一次，无法感知"从设置页返回"。
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -498,7 +509,7 @@ private fun AccessibilityGuideCard(
                     Text(
                         text = when {
                             state.isEffectivelyActive -> stringResource(R.string.a11y_status_running)
-                            state.serviceRunning ->
+                            state.isDisconnectedButAuthorized ->
                                 stringResource(R.string.a11y_status_enabled_not_connected)
                             else -> stringResource(R.string.a11y_status_not_enabled)
                         },
@@ -509,6 +520,20 @@ private fun AccessibilityGuideCard(
             }
 
             Spacer(Modifier.height(12.dp))
+
+            // ---- 服务断开提示（已授权但当前未连接）----
+            //
+            // 必须排在分步引导之前：用户此时**什么都不缺**，
+            // 强行推"去开启"的引导会让他以为是自己没设置好。
+            if (state.isDisconnectedButAuthorized) {
+                DisconnectNotice(
+                    reasonLabel = state.disconnectReason?.label,
+                    disconnectedAtMillis = state.lastDisconnectedAtMillis,
+                    onOpenSystemSettings = onOpenSystemSettings,
+                    onRefresh = onRefresh,
+                )
+                Spacer(Modifier.height(12.dp))
+            }
 
             // 分步引导：只显示当前缺失的那一步，避免一次性抛出全部信息
             when {
@@ -529,7 +554,22 @@ private fun AccessibilityGuideCard(
                     }
                 }
 
-                // 应用内开关已开但服务未运行：需要去系统设置授权
+                // 已授权且应用内开关已开，但服务实例被系统解绑。
+                //
+                // 这个分支必须显式存在，否则会落到下面的 else，
+                // 给用户显示「开启无障碍拦截」——而它本来就是开着的。
+                // 那会让用户以为是自己没设置好，反复去点一个无意义的按钮。
+                state.isDisconnectedButAuthorized && state.appSwitchEnabled -> {
+                    OutlinedButton(
+                        onClick = onRefresh,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Text(stringResource(R.string.a11y_action_recheck))
+                    }
+                }
+
+                // 应用内开关已开但确实没授权：需要去系统设置
                 state.needsSystemPermission -> {
                     Text(
                         text = stringResource(R.string.a11y_hint_steps_message),
@@ -549,7 +589,7 @@ private fun AccessibilityGuideCard(
                             onClick = onRefresh,
                             shape = RoundedCornerShape(12.dp),
                         ) {
-                            Text("已开启")
+                            Text(stringResource(R.string.a11y_action_recheck))
                         }
                     }
                 }
@@ -593,6 +633,143 @@ private fun AccessibilityGuideCard(
         }
     }
 }
+
+/**
+ * 服务断开提示块。
+ *
+ * ## 与「未开启」引导的本质区别
+ *
+ * 用户在这里**什么都不缺** —— 设置里的开关还开着，只是系统的服务实例
+ * 被解绑了。因此本块刻意：
+ *
+ * - 不用 error 配色（那是"出错了"的语义，会让用户紧张）
+ * - 主按钮是「前往设置检查」而非「去开启」（后者暗示用户漏了操作）
+ * - 文案明确写出"不需要重新授权"，从根上消除用户的困惑
+ *
+ * ## 时间显示为什么要`记得`起始时刻
+ *
+ * `SystemClock.elapsedRealtime()` 是**开机以来的时长**，不是时间戳。
+ * 由于 UI 只在状态变化时重组，这里展示的是"断开发生时算出的时长"，
+ * 不会随停留时间自动增长 —— 这对一个诊断提示来说可以接受
+ * （用户离开再回来时 `onResume` 会刷新）。真要每秒递增就得起一个
+ * 计时器，为一条诊断信息付出持续重组的代价不值得。
+ */
+@Composable
+private fun DisconnectNotice(
+    reasonLabel: String?,
+    disconnectedAtMillis: Long?,
+    onOpenSystemSettings: () -> Unit,
+    onRefresh: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = stringResource(R.string.a11y_disconnect_title),
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+            )
+
+            Spacer(Modifier.height(4.dp))
+
+            Text(
+                text = stringResource(R.string.a11y_disconnect_message),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+            )
+
+            // 断开多久 + 什么原因：这两条信息决定用户该等待还是该动手
+            val detail = disconnectDetailText(reasonLabel, disconnectedAtMillis)
+            if (detail != null) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = detail,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer.copy(
+                        alpha = DISCONNECT_DETAIL_ALPHA,
+                    ),
+                )
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = onOpenSystemSettings,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(10.dp),
+                ) {
+                    Text(stringResource(R.string.a11y_disconnect_action_settings))
+                }
+                OutlinedButton(
+                    onClick = onRefresh,
+                    shape = RoundedCornerShape(10.dp),
+                ) {
+                    Text(stringResource(R.string.a11y_action_recheck))
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 拼装断开详情文案（纯函数，便于单测与保持 Composable 精简）。
+ *
+ * @return `null` 表示没有任何可展示的明细（原因与时间都缺失）
+ */
+@Composable
+private fun disconnectDetailText(reasonLabel: String?, disconnectedAtMillis: Long?): String? {
+    val parts = mutableListOf<String>()
+
+    reasonLabel?.takeIf { it.isNotBlank() }?.let {
+        parts += stringResource(R.string.a11y_disconnect_reason, it)
+    }
+
+    disconnectedAtMillis?.let { at ->
+        parts += disconnectElapsedText(at)
+    }
+
+    return parts.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+}
+
+/**
+ * 把「断开时刻」换算成「已断开多久」。
+ *
+ * 输入是 `SystemClock.elapsedRealtime()` 的取值，因此用同样的时钟求差 ——
+ * 用 `System.currentTimeMillis()` 相减会因两者的时间基准不同而得到荒谬结果。
+ */
+@Composable
+private fun disconnectElapsedText(disconnectedAtMillis: Long): String {
+    val elapsed = SystemClock.elapsedRealtime() - disconnectedAtMillis
+
+    return when {
+        // 负数意味着时钟异常（例如进程重启后残留的旧值），
+        // 此时不展示具体时长而不是显示"-3 分钟前"
+        elapsed < 0 -> stringResource(R.string.a11y_disconnect_time_just_now)
+        elapsed < MINUTE_MILLIS -> stringResource(R.string.a11y_disconnect_time_just_now)
+        elapsed < HOUR_MILLIS ->
+            stringResource(
+                R.string.a11y_disconnect_elapsed_minutes,
+                (elapsed / MINUTE_MILLIS).toInt(),
+            )
+        else ->
+            stringResource(
+                R.string.a11y_disconnect_elapsed_hours,
+                (elapsed / HOUR_MILLIS).toInt(),
+            )
+    }
+}
+
+/** 断开明细的次要文字透明度（与诊断卡片的耗时行保持一致） */
+private const val DISCONNECT_DETAIL_ALPHA = 0.8f
+
+private const val MINUTE_MILLIS = 60_000L
+private const val HOUR_MILLIS = 3_600_000L
 
 @Preview(showBackground = true)
 @Composable

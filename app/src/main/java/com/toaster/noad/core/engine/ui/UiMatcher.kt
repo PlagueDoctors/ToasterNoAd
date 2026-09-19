@@ -3,6 +3,7 @@ package com.toaster.noad.core.engine.ui
 import com.toaster.noad.core.model.MatchMode
 import com.toaster.noad.core.model.SkipRule
 import com.toaster.noad.core.model.TargetType
+import com.toaster.noad.core.model.VIEW_ID_SUFFIX_PREFIX
 
 /**
  * 单条规则与一个节点的匹配结果。
@@ -90,20 +91,48 @@ class UiMatcher {
     /**
      * 按 viewId 匹配。
      *
-     * viewId 形如 `com.example:id/btn_skip`。规则中可能只写短名 `btn_skip`，
-     * 因此采用「完整相等 或 冒号后短名相等」两种判定，
-     * 让规则编写者不必绑定具体包名（换包名后规则依然可用）。
+     * viewId 形如 `com.example:id/btn_skip`。规则支持三种写法：
+     *
+     * 1. **完整 id**：`com.example:id/btn_skip` —— 精确相等
+     * 2. **短名**：`btn_skip` —— 冒号后短名相等，换包名后规则仍可用
+     * 3. **SDK 通用 id**（`*` 开头）：`*tt_splash_skip_btn` —— **后缀**匹配
+     *
+     * ## 为什么需要第 3 种（这是收益最高的一类规则）
+     *
+     * 广告 SDK 的跳过按钮 id 在**所有接入该 SDK 的应用中是同一个**，例如：
+     * - 穿山甲：`tt_splash_skip_btn`
+     * - 快手联盟：`ksad_splash_circle_skip_view`
+     *
+     * 但它的**包名前缀不固定** —— 可能是 SDK 自身包名
+     * （`com.byted.pangle:id/tt_splash_skip_btn`），
+     * 也可能是宿主包名（`com.cainiao.wireless:id/tt_splash_skip_btn`，
+     * 宿主覆写了 SDK 资源）。
+     *
+     * 因此用「短名相等」是匹配不上的（短名是 `tt_splash_skip_btn`，
+     * 但规则若写成完整 id 就绑死了某一个宿主）。
+     * 用后缀匹配可以一条规则覆盖**所有**接入该 SDK 的应用。
+     *
+     * 社区规则库普遍这么做，例如 GKD 的 `id$="tt_splash_skip_btn"`。
      */
     private fun matchByViewId(rule: SkipRule, nodes: List<NodeSnapshot>): MatchResult? {
         val target = rule.targetValue.trim()
         if (target.isEmpty()) return null
 
+        val suffixTarget = target.removePrefix(VIEW_ID_SUFFIX_PREFIX)
+        val bySuffix = target.startsWith(VIEW_ID_SUFFIX_PREFIX)
+        if (bySuffix && suffixTarget.isEmpty()) return null
+
         return nodes.asSequence()
             .filter { it.viewId != null }
             .filter { node ->
                 val actual = node.viewId!!
-                actual.equals(target, ignoreCase = true) ||
-                    actual.substringAfterLast('/', "").equals(target, ignoreCase = true)
+                if (bySuffix) {
+                    // 后缀匹配：`com.byted.pangle:id/tt_splash_skip_btn` 命中 `*tt_splash_skip_btn`
+                    actual.endsWith(suffixTarget, ignoreCase = true)
+                } else {
+                    actual.equals(target, ignoreCase = true) ||
+                        actual.substringAfterLast('/', "").equals(target, ignoreCase = true)
+                }
             }
             .map { node ->
                 MatchResult(rule, node, MatchResult.CONFIDENCE_VIEW_ID)
@@ -143,7 +172,7 @@ class UiMatcher {
             .minByOrNull { it.node.depth }
     }
 
-    /** 文本判定。抽成独立函数以便单测直接覆盖三种 MatchMode。 */
+    /** 文本判定。抽成独立函数以便单测直接覆盖各种 MatchMode。 */
     private fun matches(
         candidate: String,
         target: String,
@@ -151,8 +180,55 @@ class UiMatcher {
         regex: Regex?,
     ): Boolean = when (mode) {
         MatchMode.EXACT -> candidate.trim().equals(target, ignoreCase = true)
+        MatchMode.PREFIX -> matchesPrefix(candidate, target)
         MatchMode.CONTAINS -> matchesContains(candidate, target)
         MatchMode.REGEX -> regex?.containsMatchIn(candidate) == true
+    }
+
+    /**
+     * 前缀匹配。
+     *
+     * ## 这是本应用曾经完全失效的直接原因
+     *
+     * 开屏广告的跳过按钮几乎都带倒计时（真机抓包：B站 `"跳过 1"`）。
+     * 早期规则用 [MatchMode.EXACT] + `"跳过"`，`"跳过 1" != "跳过"`，
+     * **永远匹配不上** —— 表现为「无障碍已授权、应用已纳管、但零拦截、零日志」。
+     *
+     * ## 为什么前缀还不够，必须再加长度上限
+     *
+     * 我原先的理由是「正文不会以『跳过』开头」。**这个理由经不起检验** ——
+     * 「跳过此步可在设置中重新开启」正是一句以「跳过」开头的引导文案，
+     * 且它挂在指南针/权限引导页上，点下去会跳走。
+     * 该反例由 `BuiltinSkipRulesAssetTest` 的零假阳性用例暴露。
+     *
+     * 因此这里采用社区（GKD 全局规则）验证过的组合：
+     * **前缀 + 长度上限**。
+     *
+     * ```
+     * "跳过 1"                      长度 4  → 命中
+     * "跳过广告 5s"                  长度 8  → 命中
+     * "跳过此步可在设置中重新开启"      长度 13 → 拒绝
+     * ```
+     *
+     * 长度上限之所以是安全的判据：**跳过按钮为了不遮挡广告，文案必然极短**，
+     * 而引导/说明类文案为了把话说清楚必然较长。
+     *
+     * ## 为什么长度判断放匹配器里，而 CONTAINS 的防误点不放
+     *
+     * 两者性质不同：
+     * - 这里判断的是**"前缀匹配"这一语义本身是否成立** ——
+     *   一个 13 字的前缀命中不是"激进"，而是"这不是跳过按钮"。
+     *   它属于匹配语义的一部分，放这里才不会让规则页预览与运行时不一致。
+     * - `CONTAINS` 的误点防护则是**规则编写质量问题**（目标串选得太泛），
+     *   必须靠约束规则文件来解决，否则会出现"规则看起来对但不生效"。
+     *
+     * 对应李跳跳规则语法的 `+` 修饰符（`+跳过`），
+     * 长度上限对应 GKD 的 `[text.length<10]`。
+     */
+    private fun matchesPrefix(candidate: String, target: String): Boolean {
+        val trimmed = candidate.trim()
+        if (trimmed.length > MAX_PREFIX_CANDIDATE_LENGTH) return false
+        return trimmed.startsWith(target, ignoreCase = true)
     }
 
     /**
@@ -226,5 +302,25 @@ class UiMatcher {
         const val SYNTHETIC_NODE_INDEX = -1
 
         const val NO_PARENT = -1
+
+        /**
+         * [MatchMode.PREFIX] 允许的候选文本最大长度（按字符计）。
+         *
+         * 定这个值的依据（社区 GKD 全局规则用 `text.length<10`）：
+         *
+         * | 文案 | 长度 | 期望 |
+         * |---|---|---|
+         * | `跳过` | 2 | 命中 |
+         * | `跳过 1` | 4 | 命中 |
+         * | `跳过广告 5s` | 8 | 命中 |
+         * | `点击跳过 3` | 6 | 命中 |
+         * | `跳过此广告` | 5 | 命中 |
+         * | `跳过此步可在设置中重新开启` | 13 | 拒绝 |
+         *
+         * 取 10 而非 GKD 的 9：中文跳过按钮偶有「跳过广告 10s」这类
+         * 两位数倒计时（长度 9–10），留一格余量。
+         * 而上限再放宽就有让引导文案混入的风险 —— 13 字的反例已经出现。
+         */
+        const val MAX_PREFIX_CANDIDATE_LENGTH = 10
     }
 }

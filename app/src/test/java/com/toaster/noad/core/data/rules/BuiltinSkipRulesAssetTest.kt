@@ -1,9 +1,11 @@
 package com.toaster.noad.core.data.rules
 
 import com.toaster.noad.core.engine.ui.UiMatcher
+import com.toaster.noad.core.model.GLOBAL_RULE_PACKAGE
 import com.toaster.noad.core.model.MatchMode
 import com.toaster.noad.core.model.SkipRuleSource
 import com.toaster.noad.core.model.TargetType
+import com.toaster.noad.core.model.VIEW_ID_SUFFIX_PREFIX
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -130,6 +132,9 @@ class BuiltinSkipRulesAssetTest {
     @Test
     fun givenAssetFile_whenParse_thenPackageNamesLookValid() {
         loaderResult.rules.forEach { rule ->
+            // 通用规则的伪包名是唯一合法的非包名取值
+            if (rule.packageName == GLOBAL_RULE_PACKAGE) return@forEach
+
             // 至少要有一个点，且不含空白 —— 明显的笔误应立即暴露
             assertTrue("包名格式可疑：${rule.packageName}", rule.packageName.contains('.'))
             assertTrue("包名含空白：${rule.packageName}", !rule.packageName.any { it.isWhitespace() })
@@ -186,6 +191,80 @@ class BuiltinSkipRulesAssetTest {
                 hit == null,
             )
         }
+    }
+
+    @Test
+    fun givenAssetFile_whenParse_thenPrefixRulesAreShortEnough() {
+        // PREFIX 的语义是「以…开头的短文案」。目标串本身就是跳过类词，
+        // 其长度必须远小于 MAX_PREFIX_CANDIDATE_LENGTH，
+        // 否则"前缀 + 长度上限"的组合会把真实按钮也一并拒之门外。
+        loaderResult.rules
+            .filter { it.matchMode == MatchMode.PREFIX }
+            .forEach { rule ->
+                assertTrue(
+                    "PREFIX 目标串过长（${rule.targetValue}，${rule.targetValue.length} 字），" +
+                        "会挤压长度上限的余量：${rule.name}",
+                    rule.targetValue.length <= MAX_PREFIX_TARGET_LENGTH,
+                )
+            }
+    }
+
+    @Test
+    fun givenAssetFile_whenParse_thenPrefixRulesAreTextBased() {
+        // 与 CONTAINS 同理：VIEW_ID / COORDINATE 是精确匹配，PREFIX 无意义
+        loaderResult.rules
+            .filter { it.matchMode == MatchMode.PREFIX }
+            .forEach { rule ->
+                assertTrue(
+                    "非文本定位的规则不应使用 PREFIX：${rule.name}（${rule.targetType}）",
+                    rule.targetType == TargetType.TEXT ||
+                        rule.targetType == TargetType.DESCRIPTION,
+                )
+            }
+    }
+
+    @Test
+    fun givenAssetFile_whenParse_thenSuffixViewIdRulesLookWellFormed() {
+        // `*xxx` 形式的 viewId 规则走后缀匹配（用于广告 SDK 的跨应用 id）。
+        // 后缀串太短会匹配到无关控件，必须足够具体。
+        loaderResult.rules
+            .filter {
+                it.targetType == TargetType.VIEW_ID &&
+                    it.targetValue.startsWith(VIEW_ID_SUFFIX_PREFIX)
+            }
+            .forEach { rule ->
+                val suffix = rule.targetValue.removePrefix(VIEW_ID_SUFFIX_PREFIX)
+                assertTrue(
+                    "viewId 后缀过短（${rule.targetValue}），易匹配到无关控件：${rule.name}",
+                    suffix.length >= MIN_VIEW_ID_SUFFIX_LENGTH,
+                )
+                assertTrue(
+                    "viewId 后缀不应包含冒号（那说明写成了完整 id）：${rule.name}",
+                    !suffix.contains(':'),
+                )
+            }
+    }
+
+    @Test
+    fun givenAssetFile_whenParse_thenHasGlobalRuleLayer() {
+        // 通用规则层是本规则库的韧性来源：单个应用的规则失效（改版）时，
+        // 通用层仍能兜住接入同一广告 SDK 的应用。
+        // 缺少该层会让整个规则库"逐应用腐烂"。
+        val global = loaderResult.rules.filter { it.packageName == GLOBAL_RULE_PACKAGE }
+        assertTrue("内置规则缺少通用兜底层（package = \"*\"）", global.isNotEmpty())
+
+        val hasSdkId = global.any {
+            it.targetType == TargetType.VIEW_ID &&
+                it.targetValue.startsWith(VIEW_ID_SUFFIX_PREFIX)
+        }
+        assertTrue(
+            "通用层应至少包含一条广告 SDK 的 id 后缀规则（如 *tt_splash_skip_btn），" +
+                "否则无法跨应用覆盖",
+            hasSdkId,
+        )
+
+        val hasTextFallback = global.any { it.matchMode == MatchMode.PREFIX }
+        assertTrue("通用层应包含文本前缀兜底规则", hasTextFallback)
     }
 
     @Test
@@ -249,12 +328,22 @@ class BuiltinSkipRulesAssetTest {
     fun givenAssetRules_whenMatchAgainstCleanTree_thenNoFalsePositive() {
         // 用一个「正常的应用界面」节点树验证内置规则不会误命中：
         // 节点全是正文/业务入口，没有任何跳过按钮。
+        //
+        // 关键用例：
+        // `跳过此步可在设置中重新开启` —— 它**以「跳过」开头**，
+        // 是对「PREFIX 天然避开正文」这一错误假设的直接反例。
+        // 它能被拒掉，靠的是匹配器的长度上限（见 UiMatcher.matchesPrefix）。
         val matcher = UiMatcher()
         val normalNodes = listOf(
             snapshot(index = 0, depth = 0, text = "首页"),
             snapshot(index = 1, depth = 1, text = "立即购买", clickable = true),
             snapshot(index = 2, depth = 1, text = "登录/注册"),
             snapshot(index = 3, depth = 2, text = "跳过此步可在设置中重新开启", clickable = true),
+            snapshot(index = 4, depth = 1, text = "关闭广告推送通知"),
+            snapshot(index = 5, depth = 2, text = "本页面由第三方提供，点击跳过按钮关闭"),
+            snapshot(index = 6, depth = 1, text = "点击下载客户端，享受免广告体验"),
+            snapshot(index = 7, depth = 3, desc = "关闭"),
+            snapshot(index = 8, depth = 3, desc = "返回"),
         )
 
         loaderResult.rules.forEach { rule ->
@@ -266,6 +355,108 @@ class BuiltinSkipRulesAssetTest {
                 match,
             )
         }
+    }
+
+    @Test
+    fun givenActivityScopedRule_whenActivityNotMatched_thenNotApplied() {
+        // 部分规则靠 Activity 限定把「通用词」收敛到广告页面。
+        //
+        // 判定标准不是看词本身有多短，而是看**该词是否具备自我约束**：
+        // - `TEXT + PREFIX + "跳过"` 自带两层约束（位置必须是开头 + 长度 ≤ 10），
+        //   已被零假阳性用例证明安全，无需 activity 限定。
+        // - `DESCRIPTION + EXACT + "关闭"` 没有任何约束 ——
+        //   任何界面只要有个描述为「关闭」的按钮就会命中。
+        //   这类规则**必须**用 activityName 限定。
+        //
+        // 所以这里只检查「无自我约束」的组合。
+        loaderResult.rules
+            .filter { it.targetType == TargetType.DESCRIPTION }
+            .filter { it.matchMode == MatchMode.EXACT || it.matchMode == MatchMode.CONTAINS }
+            .forEach { rule ->
+                assertTrue(
+                    "描述类规则「${rule.name}」目标值「${rule.targetValue}」" +
+                        "（${rule.matchMode}）缺少自我约束，" +
+                        "必须用 activityName 限定生效界面，否则会在任意界面误点",
+                    !rule.activityName.isNullOrBlank(),
+                )
+            }
+    }
+
+    @Test
+    fun givenJsonPrefixRule_whenMatchRealWorldCountdownText_thenMatched() {
+        // 正向用例，锁定本次修复的核心行为。
+        // 真机抓包（B站，2026-09-19）：
+        //   tv.danmaku.bili:id/count_down → text = "跳过 1"
+        // 修复前规则是 EXACT「跳过」，此用例必然失败 —— 这正是应用完全失效的原因。
+        val matcher = UiMatcher()
+        val rules = listOf(
+            com.toaster.noad.core.model.SkipRule(
+                name = "test",
+                packageName = "tv.danmaku.bili",
+                targetType = TargetType.TEXT,
+                targetValue = "跳过",
+                matchMode = MatchMode.PREFIX,
+            ),
+        )
+
+        // 各种真实存在的倒计时文案变体都必须命中
+        listOf(
+            "跳过",
+            "跳过 1",
+            "跳过 3",
+            "跳过 5",
+            "跳过广告 5s",
+            "跳过广告 10s",
+            "跳过此广告",
+        ).forEach { text ->
+            val nodes = listOf(snapshot(index = 0, depth = 1, text = text, clickable = true))
+            val match = matcher.match(rules.first(), nodes)
+            assertNotNull("前缀规则未命中真实文案：\"$text\"", match)
+        }
+
+        // 反面：以「跳过」开头但明显不是按钮的长文案必须被长度上限拒掉。
+        // 这不是理论担忧 ——「跳过此步可在设置中重新开启」是真实存在的引导文案。
+        listOf(
+            "跳过此步可在设置中重新开启",
+            "跳过此步骤将无法恢复默认设置",
+            "跳过广告可以节省您的宝贵时间",
+        ).forEach { text ->
+            val nodes = listOf(snapshot(index = 0, depth = 1, text = text, clickable = true))
+            assertEquals(
+                "前缀规则误命中长文案：\"$text\"",
+                null,
+                matcher.match(rules.first(), nodes),
+            )
+        }
+    }
+
+    @Test
+    fun givenJsonSuffixViewIdRule_whenMatchSdkButtonInAnyHost_thenMatched() {
+        // 后缀 viewId 规则必须能在不同宿主包名前缀下命中：
+        // 穿山甲按钮的 id 前缀可能是 SDK 包名，也可能是宿主包名。
+        val matcher = UiMatcher()
+        val rule = com.toaster.noad.core.model.SkipRule(
+            name = "test",
+            packageName = GLOBAL_RULE_PACKAGE,
+            targetType = TargetType.VIEW_ID,
+            targetValue = "${VIEW_ID_SUFFIX_PREFIX}tt_splash_skip_btn",
+        )
+
+        listOf(
+            "com.byted.pangle:id/tt_splash_skip_btn",      // SDK 自有资源
+            "com.cainiao.wireless:id/tt_splash_skip_btn",  // 宿主覆写资源
+            "com.byted.pangle.m:id/tt_splash_skip_btn",
+        ).forEach { viewId ->
+            val nodes = listOf(snapshot(index = 0, depth = 1, viewId = viewId, clickable = true))
+            val match = matcher.match(rule, nodes)
+            assertNotNull("后缀 viewId 规则未命中：$viewId", match)
+        }
+
+        // 反面：短名相等不应误伤 —— 不带该后缀的 id 不能命中
+        val unrelated = listOf(
+            snapshot(index = 0, depth = 1, viewId = "com.foo:id/tt_splash_skip", clickable = true),
+        )
+        assertEquals(null, matcher.match(rule, unrelated))
     }
 
     // ============ 辅助 ============
@@ -297,6 +488,24 @@ class BuiltinSkipRulesAssetTest {
     private companion object {
         /** CONTAINS 目标串的最小长度（与文件 meta.criteria 的约定一致） */
         const val MIN_CONTAINS_TARGET_LENGTH = 4
+
+        /**
+         * PREFIX 目标串的最大长度。
+         *
+         * 目标串只是"开头那几个字"，本身很短；
+         * 它必须远小于 `UiMatcher.MAX_PREFIX_CANDIDATE_LENGTH`（10），
+         * 否则长度上限就没有给倒计时留出余量。
+         */
+        const val MAX_PREFIX_TARGET_LENGTH = 6
+
+        /**
+         * viewId 后缀的最小长度。
+         *
+         * 广告 SDK 的 id 普遍较长（`tt_splash_skip_btn` 18 字符、
+         * `ksad_splash_circle_skip_view` 27 字符）。设下限是防止
+         * 有人写成 `*skip` 这种会匹配到大量无关控件的规则。
+         */
+        const val MIN_VIEW_ID_SUFFIX_LENGTH = 8
 
         /** 内置跳过规则的规模上限 */
         const val MAX_EXPECTED_RULES = 300

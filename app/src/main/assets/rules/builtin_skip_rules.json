@@ -1,60 +1,64 @@
 {
-  "_comment": "NoAd 内置 S1 跳过规则（开屏广告）。每条规则由 UiMatcher 匹配节点后模拟点击。选取标准见 meta.criteria —— 宁可漏拦，绝不错点。",
-  "version": 1,
+  "_comment": "NoAd 内置 S1 跳过规则（开屏广告）。设计依据见 reference/SKIP_RULE_RESEARCH.md —— 每条规则的 note 必须写明出处（真机抓包 / 社区规则库 / SDK 文档）。",
+  "version": 2,
   "updatedAt": "2026-09-19",
   "meta": {
     "criteria": [
-      "只收录「关闭/跳过」类控件，不收录任何业务入口（如「立即查看」「领取」「打开应用」）",
-      "优先使用 viewId：它不受文案改写与多语言影响，稳定性最高",
-      "文本规则必须使用完整文案（EXACT），不得用短词做包含匹配",
-      "使用 CONTAINS 时目标串必须足够长且专有（如「跳过广告」而非「跳过」），避免命中正文",
-      "每条规则必须写 note 说明依据，便于后续审计与移除",
-      "同一应用的规则按 priority 从高到低尝试，priority 高的先匹配"
+      "三层结构：通用 SDK 规则（priority 最低，兜底所有接入该广告 SDK 的应用）→ 应用专属 viewId（priority 高）→ 应用专属文本兜底（priority 中）",
+      "文本规则优先使用 PREFIX（前缀）而非 EXACT：开屏跳过按钮几乎都带倒计时（如「跳过 1」），EXACT 必然落空",
+      "PREFIX 专用于「跳过 1」「跳过广告 5s」这类带动态后缀的按钮文案。注意 PREFIX 单独用仍不够安全 ——「跳过此步可在设置中重新开启」确实以「跳过」开头，因此匹配器对 PREFIX 附带长度上限（UiMatcher.matchesPrefix，10 字符）",
+      "CONTAINS 仅在文案内部有固定后缀时才用（如「点击跳过 3」），且目标串必须 >= 4 字符",
+      "viewId 以 * 开头表示「后缀匹配」，用于广告 SDK 的跨应用统一 id（如 *tt_splash_skip_btn）——SDK 按钮的包名前缀在不同宿主中不一致（可能是 SDK 包名 com.byted.pangle，也可能是宿主包名），只有后缀匹配能一条规则覆盖全部",
+      "每条规则必须写 note 说明依据，便于后续审计与判定失效",
+      "同一应用的规则按 priority 从高到低尝试，priority 高的先匹配",
+      "绝不收录任何业务入口（如「立即查看」「领取」「打开应用」「查看详情」）"
     ],
-    "matching": "viewId 优先 → 精确文本 → 限定包含。CONTAINS 仅用于「跳过广告」这类绝不会出现在正文中的词组。",
+    "matching": "viewId（完整/短名/后缀）优先 → 前缀文本 → 精确文本 → 限定包含。COORDINATE 不用于内置规则。",
     "auditNote": "本文件是内置规则的唯一数据源。修改后必须保证 app/src/test 下的 BuiltinSkipRulesAssetTest 全绿 —— 该测试对文件本身的格式与语义约束做断言。",
-    "limitations": "开屏广告控件的 id 与文案随应用版本频繁变化，内置规则必然存在过期情况。规则页支持用户自行增删改以应对失效场景。"
+    "limitations": "开屏广告控件的 id 与文案随应用版本频繁变化，内置规则必然存在过期情况。通用 SDK 规则层（tt_splash_skip_btn 等）用于吸收单个应用规则失效造成的漏拦；规则页支持用户自行增删改以应对剩余场景。",
+    "sources": [
+      "GKD 全局开屏规则：'[text*=\"跳过\"][text.length<10][visibleToUser=true]'",
+      "GKD 社区订阅（AIsouler / Adpro）：精确规则与通用兜底并存的组结构",
+      "李跳跳规则语法：keywords 默认模糊匹配，+ 前缀表示「以…开头」",
+      "SKIP 项目配置：B站 id 为 count_down，穿山甲 id 为 tt_splash_skip_btn",
+      "Magisk 订阅仓库 magisk317/subscription：穿山甲 com.byted.pangle:id/tt_splash_skip_btn、快手 ksad_splash_circle_skip_view",
+      "穿山甲 SDK 文档：开屏跳过按钮 id「通常是 tt_splash_skip_btn」",
+      "真机抓包 2026-09-19（NX789J / Android 15）：B站开屏 tv.danmaku.bili:id/count_down，text=\"跳过 1\"，clickable=true"
+    ]
   },
   "apps": [
     {
-      "package": "com.taobao.taobao",
-      "appLabel": "淘宝",
+      "package": "*",
+      "appLabel": "通用",
       "rules": [
         {
-          "name": "淘宝开屏-跳过按钮",
+          "name": "通用-穿山甲SDK跳过按钮（后缀）",
           "targetType": "VIEW_ID",
-          "targetValue": "com.taobao.taobao:id/tv_skip",
-          "priority": 100,
-          "note": "淘宝开屏广告右上角「跳过」按钮的经典 id，多个版本沿用"
+          "targetValue": "*tt_splash_skip_btn",
+          "priority": 20,
+          "note": "穿山甲（Pangle/巨量）开屏广告的跳过按钮 id。SDK 文档明确该 id「通常是 tt_splash_skip_btn」。包名前缀随宿主不同（com.byted.pangle:id/ 或宿主包名:id/），故用后缀匹配。一条规则覆盖所有接入穿山甲的应用，是收益最高的一条。出处：SKIP 项目配置 + Magisk 订阅仓库"
         },
         {
-          "name": "淘宝开屏-跳过文本",
-          "targetType": "TEXT",
-          "targetValue": "跳过",
-          "matchMode": "EXACT",
-          "priority": 60,
-          "note": "兜底：id 失效时按文案匹配。用 EXACT 而非 CONTAINS，避免命中「跳过此步」等引导文案"
-        }
-      ]
-    },
-    {
-      "package": "com.jingdong.app.mall",
-      "appLabel": "京东",
-      "rules": [
-        {
-          "name": "京东开屏-跳过容器",
+          "name": "通用-快手SDK跳过按钮（后缀）",
           "targetType": "VIEW_ID",
-          "targetValue": "com.jingdong.app.mall:id/skip",
-          "priority": 100,
-          "note": "京东开屏跳过按钮 id"
+          "targetValue": "*ksad_splash_circle_skip_view",
+          "priority": 20,
+          "note": "快手联盟开屏广告的圆形跳过按钮 id。出处：Magisk 订阅仓库 magisk317/subscription"
         },
         {
-          "name": "京东开屏-跳过文本",
+          "name": "通用-快手SDK跳过按钮（备选，后缀）",
+          "targetType": "VIEW_ID",
+          "targetValue": "*ksad_splash_skip_view",
+          "priority": 18,
+          "note": "快手联盟开屏广告跳过按钮的另一种 id 形态。出处：Magisk 订阅仓库"
+        },
+        {
+          "name": "通用-跳过前缀文案",
           "targetType": "TEXT",
           "targetValue": "跳过",
-          "matchMode": "EXACT",
-          "priority": 60,
-          "note": "兜底：id 失效时按文案匹配"
+          "matchMode": "PREFIX",
+          "priority": 10,
+          "note": "最后兜底：覆盖「跳过 1」「跳过 3」「跳过广告 5s」等带倒计时的文案。用 PREFIX 而非 EXACT —— 真机抓包证实 B站 文案是「跳过 1」，EXACT「跳过」永远匹配不上（这正是本应用曾完全失效的原因）。用 PREFIX 而非 CONTAINS —— 避免命中「跳过此步可在设置中重新开启」以外的长正文。注意 PREFIX 仍需配合匹配器的长度上限（UiMatcher.matchesPrefix），因为「跳过此步可在设置中重新开启」确实以「跳过」开头（该反例由 BuiltinSkipRulesAssetTest 的零假阳性用例暴露）。出处：GKD 全局规则 + 李跳跳规则语法"
         }
       ]
     },
@@ -63,126 +67,54 @@
       "appLabel": "哔哩哔哩",
       "rules": [
         {
-          "name": "B站开屏-跳过按钮",
+          "name": "B站开屏-倒计时跳过按钮",
           "targetType": "VIEW_ID",
-          "targetValue": "tv.danmaku.bili:id/skip",
+          "targetValue": "tv.danmaku.bili:id/count_down",
           "priority": 100,
-          "note": "B站开屏广告跳过按钮 id"
+          "note": "真机抓包 2026-09-19 确证：开屏广告跳过控件的 id 为 count_down，text=\"跳过 1\"，clickable=true。SKIP 项目配置中该应用同样使用 count_down（activityName=MainActivityV2），互相印证。注意 id 不是 skip —— 早期版本误写为 tv.danmaku.bili:id/skip，属凭空捏造"
         },
         {
-          "name": "B站开屏-跳过文本",
-          "targetType": "TEXT",
-          "targetValue": "跳过",
-          "matchMode": "EXACT",
-          "priority": 60,
-          "note": "兜底：id 失效时按文案匹配"
-        },
-        {
-          "name": "B站开屏-跳过广告",
-          "targetType": "TEXT",
-          "targetValue": "跳过广告",
-          "matchMode": "EXACT",
-          "priority": 70,
-          "note": "部分版本使用「跳过广告」四字文案"
-        }
-      ]
-    },
-    {
-      "package": "com.tencent.mm",
-      "appLabel": "微信",
-      "rules": [
-        {
-          "name": "微信朋友圈广告-关闭",
-          "targetType": "DESCRIPTION",
-          "targetValue": "关闭",
-          "matchMode": "EXACT",
-          "priority": 40,
-          "note": "朋友圈广告右上角关闭按钮（内容描述为「关闭」的图片按钮）。微信无开屏广告，此项用于信息流广告关闭入口"
-        }
-      ]
-    },
-    {
-      "package": "com.ss.android.ugc.aweme",
-      "appLabel": "抖音",
-      "rules": [
-        {
-          "name": "抖音开屏-跳过文本",
-          "targetType": "TEXT",
-          "targetValue": "跳过",
-          "matchMode": "EXACT",
-          "priority": 60,
-          "note": "抖音开屏广告跳过按钮（id 随版本变化较大，以文案为主）"
-        },
-        {
-          "name": "抖音开屏-跳过广告",
-          "targetType": "TEXT",
-          "targetValue": "跳过广告",
-          "matchMode": "CONTAINS",
-          "priority": 70,
-          "note": "带倒计时的文案形如「跳过广告 3s」，用 CONTAINS 覆盖变体。目标串足够专有，不会命中正文"
-        }
-      ]
-    },
-    {
-      "package": "com.sina.weibo",
-      "appLabel": "微博",
-      "rules": [
-        {
-          "name": "微博开屏-跳过按钮",
+          "name": "B站开屏-splash容器内跳过容器",
           "targetType": "VIEW_ID",
-          "targetValue": "com.sina.weibo:id/skip",
-          "priority": 100,
-          "note": "微博开屏跳过按钮 id"
+          "targetValue": "tv.danmaku.bili:id/splash_button_container",
+          "priority": 80,
+          "note": "真机抓包 2026-09-19：开屏广告的跳过按钮容器 id。作为 count_down 的父子关系补充，当 count_down 改名时此容器可能仍在"
         },
         {
-          "name": "微博开屏-跳过文本",
+          "name": "B站开屏-跳过前缀文案",
           "targetType": "TEXT",
           "targetValue": "跳过",
-          "matchMode": "EXACT",
+          "matchMode": "PREFIX",
           "priority": 60,
-          "note": "兜底：id 失效时按文案匹配"
+          "note": "兜底：id 失效时按文案匹配。真机抓包文案为「跳过 1」，必须用 PREFIX"
         }
       ]
     },
     {
-      "package": "com.xingin.xhs",
-      "appLabel": "小红书",
+      "package": "com.taobao.taobao",
+      "appLabel": "淘宝",
       "rules": [
         {
-          "name": "小红书开屏-跳过文本",
+          "name": "淘宝开屏-跳过前缀文案",
           "targetType": "TEXT",
           "targetValue": "跳过",
-          "matchMode": "EXACT",
+          "matchMode": "PREFIX",
           "priority": 60,
-          "note": "小红书开屏广告跳过按钮"
+          "note": "淘宝开屏广告的跳过按钮带倒计时（「跳过 3」形式），用 PREFIX。早期写成 EXACT「跳过」必然落空。淘宝无稳定的跳过 viewId（其开屏由自有广告平台承载），故不写 id 规则"
         }
       ]
     },
     {
-      "package": "com.netease.cloudmusic",
-      "appLabel": "网易云音乐",
+      "package": "com.jingdong.app.mall",
+      "appLabel": "京东",
       "rules": [
         {
-          "name": "网易云音乐开屏-跳过",
+          "name": "京东开屏-跳过前缀文案",
           "targetType": "TEXT",
           "targetValue": "跳过",
-          "matchMode": "EXACT",
+          "matchMode": "PREFIX",
           "priority": 60,
-          "note": "网易云音乐开屏广告跳过按钮"
-        }
-      ]
-    },
-    {
-      "package": "com.zhihu.android",
-      "appLabel": "知乎",
-      "rules": [
-        {
-          "name": "知乎开屏-跳过文本",
-          "targetType": "TEXT",
-          "targetValue": "跳过",
-          "matchMode": "EXACT",
-          "priority": 60,
-          "note": "知乎开屏广告跳过按钮"
+          "note": "京东开屏跳过按钮带倒计时。早期写成 VIEW_ID com.jingdong.app.mall:id/skip 属凭空捏造，已移除 —— 京东开屏广告由自有平台承载，无公开稳定的跳过 id"
         }
       ]
     },
@@ -191,12 +123,104 @@
       "appLabel": "美团",
       "rules": [
         {
-          "name": "美团开屏-跳过文本",
+          "name": "美团开屏-跳过前缀文案",
           "targetType": "TEXT",
           "targetValue": "跳过",
-          "matchMode": "EXACT",
+          "matchMode": "PREFIX",
           "priority": 60,
-          "note": "美团开屏广告跳过按钮"
+          "note": "美团开屏广告跳过按钮带倒计时。早期写成 EXACT「跳过」必然落空"
+        }
+      ]
+    },
+    {
+      "package": "com.sankuai.meituan.takeoutnew",
+      "appLabel": "美团外卖",
+      "rules": [
+        {
+          "name": "美团外卖开屏-跳过前缀文案",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "PREFIX",
+          "priority": 60,
+          "note": "美团外卖与美团同属一个广告体系，跳过文案一致。此包名为独立应用，必须单独登记 —— 用户报障中明确提到了美团外卖"
+        }
+      ]
+    },
+    {
+      "package": "com.ss.android.ugc.aweme",
+      "appLabel": "抖音",
+      "rules": [
+        {
+          "name": "抖音开屏-跳过前缀文案",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "PREFIX",
+          "priority": 60,
+          "note": "抖音开屏广告跳过按钮文案随版本变化较大（「跳过」「跳过广告 3s」等），id 亦不稳定，以 PREFIX 文案为主"
+        },
+        {
+          "name": "抖音开屏-跳过广告前缀",
+          "targetType": "TEXT",
+          "targetValue": "跳过广告",
+          "matchMode": "PREFIX",
+          "priority": 70,
+          "note": "抖音常见文案「跳过广告 5s」。用 PREFIX 覆盖带倒计时的变体，且不会命中正文"
+        }
+      ]
+    },
+    {
+      "package": "com.sina.weibo",
+      "appLabel": "微博",
+      "rules": [
+        {
+          "name": "微博开屏-跳过前缀文案",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "PREFIX",
+          "priority": 60,
+          "note": "微博开屏跳过按钮带倒计时。早期写成 VIEW_ID com.sina.weibo:id/skip 属凭空捏造，已移除"
+        }
+      ]
+    },
+    {
+      "package": "com.xingin.xhs",
+      "appLabel": "小红书",
+      "rules": [
+        {
+          "name": "小红书开屏-跳过前缀文案",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "PREFIX",
+          "priority": 60,
+          "note": "小红书开屏广告跳过按钮带倒计时。早期写成 EXACT「跳过」必然落空"
+        }
+      ]
+    },
+    {
+      "package": "com.netease.cloudmusic",
+      "appLabel": "网易云音乐",
+      "rules": [
+        {
+          "name": "网易云音乐开屏-跳过前缀文案",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "PREFIX",
+          "priority": 60,
+          "note": "网易云音乐开屏广告跳过按钮带倒计时"
+        }
+      ]
+    },
+    {
+      "package": "com.zhihu.android",
+      "appLabel": "知乎",
+      "rules": [
+        {
+          "name": "知乎开屏-跳过前缀文案",
+          "targetType": "TEXT",
+          "targetValue": "跳过",
+          "matchMode": "PREFIX",
+          "priority": 60,
+          "note": "知乎开屏广告跳过按钮带倒计时"
         }
       ]
     },
@@ -205,12 +229,12 @@
       "appLabel": "腾讯视频",
       "rules": [
         {
-          "name": "腾讯视频开屏-跳过",
+          "name": "腾讯视频开屏-跳过前缀文案",
           "targetType": "TEXT",
           "targetValue": "跳过",
-          "matchMode": "EXACT",
+          "matchMode": "PREFIX",
           "priority": 60,
-          "note": "腾讯视频开屏广告跳过按钮"
+          "note": "腾讯视频开屏广告跳过按钮带倒计时"
         }
       ]
     },
@@ -219,12 +243,12 @@
       "appLabel": "爱奇艺",
       "rules": [
         {
-          "name": "爱奇艺开屏-跳过",
+          "name": "爱奇艺开屏-跳过前缀文案",
           "targetType": "TEXT",
           "targetValue": "跳过",
-          "matchMode": "EXACT",
+          "matchMode": "PREFIX",
           "priority": 60,
-          "note": "爱奇艺开屏广告跳过按钮"
+          "note": "爱奇艺开屏广告跳过按钮带倒计时"
         }
       ]
     },
@@ -233,12 +257,12 @@
       "appLabel": "优酷",
       "rules": [
         {
-          "name": "优酷开屏-跳过",
+          "name": "优酷开屏-跳过前缀文案",
           "targetType": "TEXT",
           "targetValue": "跳过",
-          "matchMode": "EXACT",
+          "matchMode": "PREFIX",
           "priority": 60,
-          "note": "优酷开屏广告跳过按钮"
+          "note": "优酷开屏广告跳过按钮带倒计时"
         }
       ]
     },
@@ -247,12 +271,12 @@
       "appLabel": "UC浏览器",
       "rules": [
         {
-          "name": "UC开屏-跳过",
+          "name": "UC开屏-跳过前缀文案",
           "targetType": "TEXT",
           "targetValue": "跳过",
-          "matchMode": "EXACT",
+          "matchMode": "PREFIX",
           "priority": 60,
-          "note": "UC浏览器开屏广告跳过按钮"
+          "note": "UC浏览器开屏广告跳过按钮带倒计时"
         }
       ]
     }

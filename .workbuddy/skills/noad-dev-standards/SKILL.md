@@ -197,6 +197,23 @@ com.toaster.noad/
 `BuiltinRulesAssetTest`（域名）与 `BuiltinSkipRulesAssetTest`（UI 跳过）
 都遵循这个模式。这是防止"测试全绿但错误数据直接进用户设备"的唯一手段。
 
+### ⭐ 测试是发现设计缺陷的工具，不只是防回归
+
+R6 一轮修复中，测试捕获了 **1 个安全漏洞 + 3 个设计缺陷**，
+全部**不是**由实机发现的：
+
+| 缺陷 | 捕获方式 |
+|---|---|
+| 通用规则泄漏到未纳管应用（越权点击） | `S1RuleCacheTest` 断言未纳管返回空 |
+| 前缀匹配不足以防正文 | 反例 `跳过此步可在设置中重新开启` 进了测试树 |
+| `关闭广告` 前缀仍假阳性 | `关闭广告推送通知` 未超长度上限 |
+| `desc="关闭"` 缺 activity 限定 | `*AssetTest` 强制约束 |
+
+**因此不要为了"让测试通过"而放宽断言** —— 上面每条断言放宽后，
+对应的真实缺陷都会直接进用户设备。
+
+写测试时请刻意构造**反例**：不只测"应该命中"，更要测"不应该命中"。
+
 ### ⚠️ 交付验证标准（用户明确界定）
 
 **用户自己执行实机测试，不要求我运行仪器测试或产出完整 APK。**
@@ -294,6 +311,10 @@ JUnit4 + `kotlinx-coroutines-test` + `org.json` + `room-testing`。
 - [ ] **改表结构已补 `Migration(n, n+1)` + 迁移测试**，
       未使用 `fallbackToDestructiveMigration()`
 - [ ] **枚举存库用显式小写字符串**（`persistedName`），未用 `enum.name`
+- [ ] **`EventProcessor` 事件回调内无同步重活** —— 点击已投递后台，
+      节点遍历前有廉价预筛；新增预筛条件时必须满足「只放宽不收紧」
+- [ ] **未给无障碍服务加任何"保活"**（前台服务 / JobScheduler / AlarmManager 均无效）；
+      涉及服务断开的改动已确认三态区分正确、且时钟可注入
 
 ## 十二、S1 无障碍（阶段 B：代码完成，待实机验证）
 
@@ -311,19 +332,302 @@ JUnit4 + `kotlinx-coroutines-test` + `org.json` + `room-testing`。
 **因此新增或修改这条链路时，必须验证「规则能进 DB 并被读到」，
 而不只是验证「匹配逻辑正确」。**
 
+### 第二道教训：规则正确 ≠ 规则写得对
+
+链路修通、规则入库后（`skip_rule = 20`），`intercept_log` **仍为 0**。
+真机抓包发现：规则的定位值**是凭常识推测的**，与真实节点完全不同 ——
+
+```
+真机 B 站开屏节点：
+  rid  = tv.danmaku.bili:id/count_down
+  text = "跳过 1"          ← 开屏按钮几乎都带倒计时
+```
+
+而当时写的三条 B 站规则全部落空：
+`id/skip`（该 id 不存在）、`EXACT "跳过广告"`、`EXACT "跳过"`
+（实际文本是「跳过 1」）。
+
+**铁律：规则必须来自实证，不能来自常识。**
+"某应用大概有个叫 skip 的按钮"这类推断，**一次都不该出现在规则文件里**。
+
+### ⚠️ 第三条教训：性能修复的头号风险是「静默漏拦」（R7）
+
+用户报告**「启动任何应用时存在一个半秒左右的明显延迟」** ——
+注意这条反馈的性质：**不是拦截失效，而是拦截生效后引入的副作用**。
+排查方向与前面两条完全不同：要找「谁在主线程干了重活」。
+
+#### 主线程路径的三个成本源（改 `EventProcessor` 必读）
+
+`onAccessibilityEvent` **默认在主线程回调**，任何同步重活都直接吃掉帧预算。
+
+| 成本源 | 机制 | 量级 |
+|---|---|---|
+| 点击同步执行 | `ClickExecutor.execute` 含 `findByIndex` 全树 BFS + `ACTION_CLICK` IPC，失败回落 `dispatchGesture`（手势播放约 40ms） | 50–300ms |
+| 每个事件遍历整树 | 启动时内容变化事件数十次 × `UiTreeScanner.scan()`，500 节点 = 数百次 `getChild` IPC | 累计数百 ms |
+| `notificationTimeout` | 事件被系统合并 | 最多 100ms |
+
+#### ⭐ 核心铁律：预筛只放宽、不收紧
+
+在遍历节点树前用事件自带文本做一次**无 IPC**的廉价预筛是主要优化手段，
+但预筛**一旦比权威实现 `UiMatcher` 严格**，就会产生
+「事件被预筛丢弃、永远走不到匹配」的**静默漏拦** ——
+**现象与「规则写错」完全一致，极难排查。**
+
+具体规则（全部有测试守护，不要"优化"掉）：
+
+- 规则集为空 → 放行
+- **任何 `VIEW_ID` / `COORDINATE` 型规则 → 整体放行**。
+  `AccessibilityEvent` **没有** `viewIdResourceName` 属性
+  （那是 `AccessibilityNodeInfo` 才有的），从事件侧根本无法判断 viewId 规则是否命中
+- **任何 `REGEX` 型规则 → 整体放行**（正则 ≠ 纯字符串前缀匹配）
+- 事件无任何文本候选 → 放行（**信息不足时绝不能替权威实现做否决**）
+- **禁止自实现 activity 预筛** —— 它是纯字符串比较、零 IPC 成本，
+  交给权威实现 `filterByActivity` 即可；自己实现一遍必然引入语义偏差
+
+守护测试：`EventPreFilterTest.givenRealWorldSkipTexts_whenMatcherHits_thenPreFilterAlwaysPasses`
+枚举真实文案，逐条断言「`UiMatcher` 命中 ⇒ 预筛必然放行」。
+
+> 这条铁律的代价是真实发生过的：我确实在 `EventPreFilter` 里自实现了 activity
+> 预筛且比权威实现更严格，**测试连挂两次才暴露**。
+> 放任不管的话，用户会看到「某些应用又拦不住了」，
+> 而排查方向会错误地指向规则文件。
+
+#### 点击必须投递到后台线程
+
+`performAction` / `getChild` **是 IPC 调用，不受「必须主线程」约束**。
+
+```kotlin
+val scope = handoffScope ?: return ProcessOutcome.Deferred(...)
+scope.launch(handoffContext) { performClick(...) }   // Dispatchers.Default
+return ProcessOutcome.ClickScheduled(...)
+```
+
+- 无 scope 时返回 `Deferred` **显式暴露**，不要静默丢弃
+- **`ClickScheduled` 不计入 `totalClicks`** —— 投递 ≠ 点击成功，
+  统计口径不能被乐观化
+- 降频职责交给预筛后，`EVENT_TIMEOUT_MS` 应置 `0`（把及时性换回来）
+
+#### 耗时诊断（用户实机自检通道）
+
+`SkipDiagnosticsState`：`lastCostMs` / `maxCostMs` / `slowEventCount`，
+常量 `FRAME_BUDGET_MS = 16L`、`SLOW_EVENT_THRESHOLD_MS = 100L`，派生 `hasFrameDrop`。
+规则页诊断卡片显示「单次处理耗时：最近 Nms · 峰值 Mms」。
+
+**排查启动卡顿时，先看这行数字**：长期高于 16ms 即说明重活又回到了主线程路径。
+
+#### 顺手项：Room 启用 WAL
+
+`NoAdDatabase.build()` 必须带 `.setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)`。
+默认 `AUTOMATIC` 在部分 OEM ROM 上落到 TRUNCATE 模式，每次写事务重建 journal
+并 fsync；拦截日志恰好是「启动时高频小写入」，这笔开销正叠在冷启动路径上。
+
+### ⚠️ 第四条教训：无障碍是「授权模型」，不存在「保活」（R8）
+
+用户报告**"无障碍权限在息屏/切换应用后系统自动又关闭了，想办法让它常驻"**。
+
+**这个请求的前提是错的，必须先纠正**：
+
+无障碍**不存在"常驻"这个状态**，因此没有"让它常驻"的实现方式。
+用户在设置里勾选后，系统把这一条写进
+`Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES`，之后**由系统自行决定**
+何时连接、何时解绑。**没有任何 API 能让应用要求系统"保持连接"。**
+
+关键推论：**服务被解绑时，设置里的授权记录依然存在** ——
+这正是它能被系统自动重连的原因。
+
+| 用户感知 | 实际状态 | 结论 |
+|---|---|---|
+| "权限被自动关了" | 授权还在，只是服务实例被解绑 | **不需要重新授权** |
+| 真正要解决的 | 断开未被及时发现与呈现 | 做**自愈检测**，不是保活 |
+
+#### 🔴 禁止的做法（附理由，不要重新"优化"回来）
+
+| 方案 | 为什么禁止 |
+|---|---|
+| 前台服务 / `AlarmManager` / `JobScheduler` 给无障碍保活 | **完全无效**。它们影响进程优先级，而服务绑定由系统的无障碍管理器决定。纯粹白耗电 |
+| `adb` / Shizuku 写 `Settings.Secure` | 需用户每 12 小时重新授权调试；属系统性写操作，影响面超出本应用 |
+| 隐藏断开事实、只显示"已开启" | 违背 UI 诚实性原则（三字段分离的初衷就是"不掩盖断开"） |
+
+#### 正确的做法：自愈检测 + 如实呈现
+
+**`AccessibilityState` 的三态必须严格区分**（写错会让用户白跑设置）：
+
+```kotlin
+// ⭐ 已授权但当前未连接 —— 最需要自愈的一态
+val isDisconnectedButAuthorized: Boolean
+    get() = !serviceRunning && serviceEnabledInSettings
+```
+
+| 状态 | UI 文案 | 用户该做 |
+|---|---|---|
+| `isEffectivelyActive` | 运行中 | 什么都不做 |
+| `isDisconnectedButAuthorized` | 已授权，服务暂时断开 | **什么都不做**（等自愈） |
+| `isNotAuthorized` | 未开启 | 去系统设置 |
+
+`AccessibilityWatchdog`（进程级，`Application.onCreate` 同步启动）监听：
+
+- `ACTION_SCREEN_ON` / `ACTION_USER_PRESENT` / `ACTION_BOOT_COMPLETED`
+- `ACCESSIBILITY_STATE_CHANGED`（API 31+）
+
+**刻意不注册** `ACTION_SCREEN_OFF`：息屏瞬间状态无意义。
+`start()` 只做注册，核对在协程里（不拖慢冷启动）。
+Android 14+ 必须传 `RECEIVER_NOT_EXPORTED`，否则抛 `SecurityException`。
+
+前台侧由 `HomeScreen` 的 `ON_RESUME` 覆盖（从设置页返回时屏幕既没亮也没解锁，
+广播不会发）。**两层缺一不可。**
+
+#### 两条实现约束（都被测试捕获过）
+
+**① 首因优先**：`onUnbind` 与 `onDestroy` 会因同一次断开先后触发，
+前者信息更具体。因此**不接受覆盖**：
+
+```kotlin
+disconnectReason = current.disconnectReason ?: reason   // ← 不是 reason ?: current
+```
+
+写成 `reason ?: current` 等价于"有值就覆盖"，`onDestroy` 会盖掉 `onUnbind`。
+断开时刻同理只在**首次**写入，否则「已断开多久」永远显示「刚刚」。
+
+**② 时钟必须可注入**：直接用 `SystemClock.elapsedRealtime()` 会让
+**整个状态机在 JVM 上无法测试**（`android.jar` 是空壳，方法体全是 `throw`，
+报 `Method elapsedRealtime not mocked`）。而状态机决定了 UI 说"去设置"还是
+"等一等"，是最不能靠猜的部分：
+
+```kotlin
+internal var clock: () -> Long = { SystemClock.elapsedRealtime() }
+```
+
+测试注入计数器后，「已断开多久」的边界（刚断开 / 59 秒 / 1 分 / 59 分 / 1 小时）
+才可验证。
+
+#### 关于「设置读取」的诚实边界
+
+`refreshFromSystemSettings` 依赖 `ContentResolver`，项目**无 Robolectric**，
+JVM 上拿不到。因此提供 `internal fun seedSettingsFlagForTest(enabled: Boolean)`，
+用于验证**由该字段驱动的三态判定**。
+
+**不覆盖**设置读取路径本身——那是 Android 平台行为，由用户实机验证。
+这个边界必须在测试类 KDoc 里如实标注，**不假装覆盖了 `Settings.Secure` 读取**。
+
 ### 完整规则链路（改动前先读）
 
 ```
-assets/rules/builtin_skip_rules.json   (14 应用 / 20 条 / version 1)
+assets/rules/builtin_skip_rules.json   (15 应用组 / 21 条 / version 2，含通用层 "*")
   → BuiltinSkipRulesLoader.load(context)   逐条容错，坏条目只跳过自己
   → RuleRepository.mergeBuiltin(rules)     跨来源去重 / 只增不改不删
   → skip_rule 表 (source = 'builtin')
   → RuleRepository.observeEnabledRules() → S1RuleCache（AtomicReference 内存快照）
-  → EventProcessor 四道闸 → UiMatcher → ClickExecutor
+        ↑ 通用规则单独存放，查询时附加到已纳管应用
+  → EventProcessor 四道闸 → UiMatcher → ClickExecutor → SkipDiagnostics
 ```
 
 启动入口为 `NoAdApplication.initializeSkipRules()`，仅在
 `RuleRepository.needsBuiltinImport()` 为 true 时导入。
+
+### ⭐ 匹配规则设计（写规则前必读）
+
+#### 三层结构
+
+| 层 | 包名 | 定位方式 |
+|---|---|---|
+| **通用层** | `"*"`（`GLOBAL_RULE_PACKAGE`） | SDK viewId 后缀 + 文本前缀 |
+| **专属 viewId** | 具体包名 | 精确 viewId / 后缀 |
+| **专属文本兜底** | 具体包名 | `TEXT PREFIX` |
+
+#### 定位方式选择（有明确判据，不要凭感觉）
+
+- **SDK 统一 id → `VIEW_ID` + 后缀 `*`**（收益最高）
+  - 穿山甲 `*tt_splash_skip_btn`、快手 `*ksad_splash_circle_skip_view`
+  - 按钮 id 的**包名前缀随宿主而异**（`com.byted.pangle:id/` 或
+    `com.cainiao.wireless:id/`），只有后缀稳定
+- **带倒计时按钮 → `TEXT` + `MatchMode.PREFIX`**
+  - `EXACT` 因文本动态化**必然落空** —— 这是 S1 曾完全失效的直接原因
+  - `CONTAINS` 会命中正文
+- **`DESCRIPTION` + `EXACT`/`CONTAINS` → 必须同时给 `activityName`**
+  - `desc="关闭"` / `desc="返回"` 这类通用词否则会乱点
+
+#### 护栏常量（改动需同步测试）
+
+| 常量 | 值 | 位置 |
+|---|---|---|
+| `MAX_PREFIX_CANDIDATE_LENGTH` | 10 | `UiMatcher`，对应 GKD `[text.length<10]` |
+| `MAX_PREFIX_TARGET_LENGTH` | 6 | `BuiltinSkipRulesAssetTest` 断言规则 |
+| `MIN_VIEW_ID_SUFFIX_LENGTH` | 8 | `BuiltinSkipRulesAssetTest` 断言规则 |
+
+> ⚠️ **前缀匹配单独用并不安全**。曾以为"正文不会以『跳过』开头"，
+> 但 `跳过此步可在设置中重新开启` **正是反例** —— 因此必须配长度上限。
+> 这条推理错误已被写成测试用例，不要重新"优化"掉长度上限。
+
+#### 禁止的规则写法
+
+1. `TEXT` + `EXACT` 匹配开屏文案（文本本质动态，必然漏拦）
+2. `关闭广告` 前缀规则 —— `关闭广告推送通知` 仅 8 字，前缀+长度两重
+   约束仍不足以防假阳性，**已全部删除**
+3. 微信 `com.tencent.mm` —— 无开屏广告；朋友圈是信息流广告；
+   `activityName` 不可靠。收录它只有风险
+4. **凭推测填 `activityName`** —— 不可靠的限定比不限定危害更大
+   （限定错了是**静默失效**，而不限定至少还能匹配）
+
+#### 🔴 通用规则的安全契约（改动 `S1RuleCache` 必读）
+
+**通用规则同样受"应用必须被纳管"约束。**
+
+`rulesForPackage` 曾经写成：
+```kotlin
+if (global.isEmpty()) return own ?: emptyList()
+if (own.isNullOrEmpty()) return global   // ← 缺陷！
+```
+未纳管应用既不在 `byPackage`（`own` 为 null），又因通用规则存在
+而入围第二个分支 → **拿到了本不该生效的通用规则** →
+**在用户从未授权的应用上执行点击**。
+
+**修正：函数开头先判 `packageName !in snapshot.managedPackages` 返回空。**
+由 `S1RuleCacheTest` 钉死，改动此方法务必跑该测试类。
+
+#### `S1RuleCache` 的构造签名（为可测性做过重构）
+
+主构造函数接受**两个 Flow**（`targetAppsFlow` / `enabledRulesFlow`），
+次构造函数接受两个仓库。
+
+不要"简化"回只接受仓库：`TargetAppRepository` 需要 `Context`，
+而项目测试栈**无 Robolectric**，原签名会让快照构建逻辑
+（包含上面那条核心安全契约）**永远无法在 JVM 上验证**。
+
+#### 排障入口：`SkipDiagnostics`（不是可选功能）
+
+部分 ROM 抑制应用日志（实测 NX789J 的 `log.tag.NoAdAccessibility`
+被设为 Silent，无 root 无法更改）。因此引擎判定结果写入**内存 `StateFlow`**，
+在规则页顶部「匹配诊断」卡片展示。
+
+- 用**内存而非 DB**：诊断非审计数据，不值得付一次 `Migration(2,3)`
+- 用 `MutableStateFlow` 而非 `AtomicReference`：UI 需感知变化
+- 字段名是 **`availableRuleCount`**；展示模型 `DiagnosticsItem.ruleCount`
+  由它赋值（曾误写为 `ruleCount` 导致编译失败）
+- `lastReason` 与 `lastOutcome` **互斥**，UI 靠此不变式二选一
+
+### 失败静默治理
+
+`EventProcessor` 的每道闸门返回带原因的 `ProcessOutcome.Ignored(SkipReason)`，
+日志形如 `事件跳过: <REASON>（<中文说明>）`（`recordSkipReason` 做同值去重防刷屏）。
+`process()` 外层包装统一调用 `SkipDiagnostics.record(...)`，
+**任何返回路径都会被覆盖**（不要在各 return 点单独记录，漏一条就查不出原因）。
+
+| `SkipReason` | 含义 | 用户该做什么 |
+|---|---|---|
+| `APP_NOT_MANAGED` | 应用未纳管 | 去应用管理页勾选 |
+| `NO_RULE_FOR_PACKAGE` | 该应用无规则 | 等规则库扩充或自建规则 |
+| `ACTIVITY_MISMATCH` | 界面不匹配 | 规则 activity 限定过窄 |
+| `IRRELEVANT_EVENT` | 事件类型无关 | 正常 |
+| `PRE_FILTERED` | 事件文本与所有规则都不沾边，未遍历节点 | 正常降频；疑似漏拦时才关注 |
+| `NO_ROOT_NODE` / `EMPTY_NODE_TREE` | 取不到节点树 | ROM 限制 |
+| `NO_NODE_MATCH` | 未命中任何节点 | 规则定位值需更新 |
+
+> `PRE_FILTERED` 与 `NO_NODE_MATCH` **必须区分**：前者是"连树都没读"，
+> 后者是"读了树但没命中"。合并成一个原因会让"预筛过严"这一故障
+> 伪装成"规则不对"，正是 R7 要防的那类误判。
+
+**新增闸门时必须给出 `SkipReason`**，不得返回无原因的忽略 ——
+否则用户只能看到"没反应"，无法定位卡在哪一环。
 
 ### 规则来源的编码约定（极易出错）
 
@@ -368,23 +672,6 @@ v1 没有任何内置导入路径，存量行必然是用户手工产生的，
   （立即 / 领取 / 查看 / 下载 / 打开 / 安装 / 购买 / 下单 / 抽奖 /
   红包 / 优惠 / 开通 / 授权 / 同意 / 允许）
 - **`AntiMisclickGate` 冷却层**：规则 3s / 节点 5s / 全局 400ms
-
-### 失败静默治理
-
-`EventProcessor` 的每道闸门返回带原因的 `ProcessOutcome.Ignored(SkipReason)`，
-日志形如 `事件跳过: <REASON>（<中文说明>）`（`recordSkipReason` 做同值去重防刷屏）。
-
-| `SkipReason` | 含义 | 用户该做什么 |
-|---|---|---|
-| `APP_NOT_MANAGED` | 应用未纳管 | 去应用管理页勾选 |
-| `NO_RULE_FOR_PACKAGE` | 该应用无规则 | 等规则库扩充或自建规则 |
-| `ACTIVITY_MISMATCH` | 界面不匹配 | 规则 activity 限定过窄 |
-| `IRRELEVANT_EVENT` | 事件类型无关 | 正常 |
-| `NO_ROOT_NODE` / `EMPTY_NODE_TREE` | 取不到节点树 | ROM 限制 |
-| `NO_NODE_MATCH` | 未命中任何节点 | 规则定位值需更新 |
-
-**新增闸门时必须给出 `SkipReason`**，不得返回无原因的忽略 ——
-否则用户只能看到"没反应"，无法定位卡在哪一环。
 
 ### 必须
 

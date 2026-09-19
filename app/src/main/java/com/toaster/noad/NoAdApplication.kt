@@ -13,7 +13,10 @@ import com.toaster.noad.core.data.settings.SettingsRepository
 import com.toaster.noad.core.database.NoAdDatabase
 import com.toaster.noad.core.database.entity.DomainRuleEntity
 import com.toaster.noad.core.service.AccessibilityStateHolder
+import com.toaster.noad.core.service.AccessibilityWatchdog
 import com.toaster.noad.core.service.ProtectionFlags
+import com.toaster.noad.core.service.keepalive.KeepAliveRuntime
+import com.toaster.noad.core.service.keepalive.KeepAliveService
 import com.toaster.noad.core.repository.S1RuleCache
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -140,12 +143,54 @@ class NoAdApplication : Application() {
             .onEach(AccessibilityStateHolder::setAppSwitchEnabled)
             .launchIn(applicationScope)
 
+        // 后台保活的单一接线点：设置变化 → 启停前台服务 + 同步内存镜像。
+        //
+        // 放在 Application（而非 ViewModel）的原因：
+        // - 保活的存活周期等于进程，与任何界面无关
+        // - 心跳闹钟 / 开机接收器拉起进程时，UI 根本不存在，
+        //   只有这里的观察者能在进程启动后立即恢复服务
+        // - ViewModel 只负责写设置（单一数据流方向，避免双写竞态）
+        //
+        // 首次发射还承担「进程被无障碍重连拉起后恢复保活」的职责；
+        // 若此刻应用在后台，startForegroundService 可能被系统拒绝 ——
+        // ensureStarted 内部吞掉该异常，链条由心跳闹钟兜底。
+        container.settingsRepository.keepAliveEnabled
+            .onEach { enabled ->
+                KeepAliveRuntime.update(enabled)
+                if (enabled) {
+                    KeepAliveService.ensureStarted(this)
+                } else {
+                    KeepAliveService.ensureStopped(this)
+                }
+            }
+            .launchIn(applicationScope)
+
+        // 启动无障碍服务的自愈监听。
+        //
+        // 必须在 onCreate 中同步启动（不能塞进下面的异步初始化块）：
+        // 息屏/解锁广播可能在初始化任务跑完之前就到达，
+        // 晚注册会漏掉那一次恢复时机。
+        //
+        // 注意 start() 内部只做注册（廉价），真正的状态核对在协程里异步执行，
+        // 因此不会拖慢冷启动。
+        accessibilityWatchdog.start()
+
         applicationScope.launch {
             initializeDomainRules()
             initializeSkipRules()
             pruneUninstalledTargetApps()
             trimLogOverflow()
         }
+    }
+
+    /**
+     * 无障碍自愈监听器。
+     *
+     * 用 `applicationScope` 作为刷新作用域：核对的存活周期应等于进程，
+     * 而不是某个界面的生命周期。
+     */
+    private val accessibilityWatchdog by lazy {
+        AccessibilityWatchdog(appContext = this, scope = applicationScope)
     }
 
     /**

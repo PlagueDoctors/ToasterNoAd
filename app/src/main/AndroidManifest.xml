@@ -23,6 +23,14 @@
     <!-- 开机自启动（可选，由设置开关控制） -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!--
+        请求「忽略电池优化」豁免（设置页提供入口）。
+        在激进省电 ROM（努比亚等）上，系统可能直接杀前台服务或拒绝
+        后台启动；官方豁免清单里「用户关闭电池优化」是确定可用的
+        后台前台服务启动豁免 —— 需要用户在系统弹窗中确认一次。
+    -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <application
         android:name=".NoAdApplication"
         android:allowBackup="true"
@@ -73,6 +81,43 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <!--
+            应用进程保活前台服务（R9）。
+
+            - foregroundServiceType="specialUse"：本应用不属于任何
+              既有类型（音乐/定位/同步等）；specialUse 配合下方 subtype
+              属性向系统声明用途。Android 15 起的 BOOT_COMPLETED
+              前台服务启动白名单明确包含 specialUse
+              （兼容框架 FGS_BOOT_COMPLETED_RESTRICTIONS 豁免类型之一）
+            - exported="false"：只有本应用自己启动它
+            - 常驻通知为系统强制要求，使用低优先级静默渠道
+        -->
+        <service
+            android:name=".core.service.keepalive.KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keep the ad-blocking accessibility service process alive so interception survives process death" />
+        </service>
+
+        <!--
+            保活链条的外部触发入口：开机 / 应用更新 / 心跳闹钟。
+
+            - exported="true"：BOOT_COMPLETED 与 MY_PACKAGE_REPLACED 都是
+              受保护系统广播（第三方无法伪造），导出无风险；
+              部分厂商 ROM 对非导出接收器的系统广播投递不可靠
+            - 心跳 action 走显式 Intent 投递，不进 filter，无暴露面
+        -->
+        <receiver
+            android:name=".core.service.keepalive.KeepAliveReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 

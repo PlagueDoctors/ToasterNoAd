@@ -44,6 +44,7 @@ class SettingsRepository(private val context: Context) {
             vpnYielded = prefs[KEY_VPN_YIELDED] ?: false,
             shizukuEnhancementsEnabled = prefs[KEY_SHIZUKU_ENABLED] ?: false,
             autostart = prefs[KEY_AUTOSTART] ?: false,
+            keepAliveEnabled = prefs[KEY_KEEP_ALIVE] ?: DEFAULT_KEEP_ALIVE,
             showNotification = prefs[KEY_SHOW_NOTIFICATION] ?: true,
             darkTheme = prefs[KEY_DARK_THEME] ?: true,
             logRetentionDays = prefs[KEY_LOG_RETENTION_DAYS] ?: DEFAULT_RETENTION_DAYS,
@@ -70,6 +71,30 @@ class SettingsRepository(private val context: Context) {
     }
 
     val darkTheme: Flow<Boolean> = store.data.map { it[KEY_DARK_THEME] ?: true }
+
+    /**
+     * 后台保活是否开启（前台服务 + 被杀自启）。
+     *
+     * 默认开启：该功能的存在意义是「用户装了 NoAd 就默认被保护」，
+     * 关闭是用户的显式选择。
+     *
+     * 消费方有两类：
+     * - [com.toaster.noad.NoAdApplication] 的观察者（启停前台服务）
+     * - [com.toaster.noad.core.service.keepalive.KeepAliveReceiver]
+     *   （开机 / 更新 / 心跳时读取权威值做恢复决策）
+     */
+    val keepAliveEnabled: Flow<Boolean> =
+        store.data.map { it[KEY_KEEP_ALIVE] ?: DEFAULT_KEEP_ALIVE }
+
+    /**
+     * 开机自启动（恢复保活）是否开启。
+     *
+     * 独立于 [keepAliveEnabled]：保活管「运行期间不被杀、被杀自启」，
+     * 本开关管「设备重启后是否自动恢复保活」。
+     * 只被 BOOT_COMPLETED 路径读取。
+     */
+    val autostart: Flow<Boolean> =
+        store.data.map { it[KEY_AUTOSTART] ?: false }
 
     suspend fun setProtectionEnabled(enabled: Boolean) {
         store.edit { it[KEY_PROTECTION_ENABLED] = enabled }
@@ -101,6 +126,10 @@ class SettingsRepository(private val context: Context) {
         store.edit { it[KEY_AUTOSTART] = enabled }
     }
 
+    suspend fun setKeepAliveEnabled(enabled: Boolean) {
+        store.edit { it[KEY_KEEP_ALIVE] = enabled }
+    }
+
     suspend fun setShowNotification(enabled: Boolean) {
         store.edit { it[KEY_SHOW_NOTIFICATION] = enabled }
     }
@@ -126,12 +155,16 @@ class SettingsRepository(private val context: Context) {
         const val DEFAULT_RETENTION_DAYS = 7
         const val DEFAULT_LOG_CAPACITY = 5_000
 
+        /** 后台保活默认值：开启（关闭是用户的显式选择） */
+        const val DEFAULT_KEEP_ALIVE = true
+
         private val KEY_PROTECTION_ENABLED = booleanPreferencesKey("protection_enabled")
         private val KEY_ACCESSIBILITY_ENABLED = booleanPreferencesKey("accessibility_enabled")
         private val KEY_NETWORK_FILTER_MODE = stringPreferencesKey("network_filter_mode")
         private val KEY_VPN_YIELDED = booleanPreferencesKey("vpn_yielded")
         private val KEY_SHIZUKU_ENABLED = booleanPreferencesKey("shizuku_enhancements_enabled")
         private val KEY_AUTOSTART = booleanPreferencesKey("autostart")
+        private val KEY_KEEP_ALIVE = booleanPreferencesKey("keep_alive_enabled")
         private val KEY_SHOW_NOTIFICATION = booleanPreferencesKey("show_notification")
         private val KEY_DARK_THEME = booleanPreferencesKey("dark_theme")
         private val KEY_LOG_RETENTION_DAYS = intPreferencesKey("log_retention_days")
@@ -149,6 +182,7 @@ data class AppSettings(
     val vpnYielded: Boolean = false,
     val shizukuEnhancementsEnabled: Boolean = false,
     val autostart: Boolean = false,
+    val keepAliveEnabled: Boolean = SettingsRepository.DEFAULT_KEEP_ALIVE,
     val showNotification: Boolean = true,
     val darkTheme: Boolean = true,
     val logRetentionDays: Int = SettingsRepository.DEFAULT_RETENTION_DAYS,

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    通知小图标（R9 保活前台服务用）。
+
+    通知小图标必须是纯 alpha（单色 + 透明）图形：系统按深浅色主题
+    自动反色渲染，携带颜色的图标会显示为灰色色块。
+    图形为简单盾牌轮廓，与「保护」语义一致。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,2 L20,5 V11 C20,16.2 16.6,20.4 12,22 C7.4,20.4 4,16.2 4,11 V5 Z M12,4.2 L6,6.5 V11 C6,15.1 8.7,18.5 12,19.8 C15.3,18.5 18,15.1 18,11 V6.5 Z M11,7.5 H13 V11 H16.5 V13 H13 V16.5 H11 V13 H7.5 V11 H11 Z" />
+</vector>

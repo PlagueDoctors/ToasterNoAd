@@ -75,6 +75,18 @@ class SettingsViewModel(
         viewModelScope.launch { settingsRepository.setAutostart(enabled) }
     }
 
+    /**
+     * 切换后台保活。
+     *
+     * 只写设置：服务的启停由 Application 的观察者流统一驱动
+     * （单一接线点，见 NoAdApplication.onCreate），
+     * ViewModel 不直接操作 Service —— 避免「UI 层与接收器层
+     * 各自启停」的双写竞态。
+     */
+    fun setKeepAliveEnabled(enabled: Boolean) {
+        viewModelScope.launch { settingsRepository.setKeepAliveEnabled(enabled) }
+    }
+
     fun setShowNotification(enabled: Boolean) {
         viewModelScope.launch { settingsRepository.setShowNotification(enabled) }
     }

@@ -1278,10 +1278,60 @@ while (true) {
 
 | 来源 | 说明 | 当前状态 |
 |---|---|---|
-| 内置规则 | `assets/rules/builtin_skip_rules.json`（14 应用 / 20 条） | ✅ 已实现（2026-09-19） |
-| 规则页 | 按应用分组、启停、删除 | ✅ 已实现（2026-09-19） |
+| 内置规则 | `assets/rules/builtin_skip_rules.json`（15 应用 / 21 条，含通用层） | ✅ 已实现（2026-09-19，R6 重写） |
+| 规则页 | 按应用分组、启停、删除、**实时匹配诊断** | ✅ 已实现（2026-09-19） |
 | 用户新增 | 应用内手工创建规则 | ⏳ 待实现（`RuleRepository.add` 已就绪，缺编辑 UI） |
 | 坐标兜底 | 内置不提供（跨分辨率失效） | ⏳ 待实现（用户可自行添加） |
+
+### 8.6 S1 跳过规则设计（✅ 已定，2026-09-19，R6）
+
+> 本节是 R6 修复的直接产物。R6 之前规则是凭常识推测的，
+> 与真机节点完全不符，导致拦截恒为 0。详见「阶段 B 第二轮修复」。
+
+#### 三层结构（优先级从低到高）
+
+| 层 | 包名 | 定位方式 | 作用范围 |
+|---|---|---|---|
+| **通用层** | `"*"` | SDK viewId 后缀 + 文本前缀 | 任意**已纳管**应用 |
+| **专属 viewId** | 具体包名 | 精确 viewId / 后缀 | 单个应用 |
+| **专属文本兜底** | 具体包名 | `TEXT PREFIX` | 单个应用 |
+
+#### 定位方式的选择依据
+
+| 场景 | 推荐 | 理由 |
+|---|---|---|
+| SDK 统一 id | `VIEW_ID` + 后缀 `*tt_splash_skip_btn` | 一条覆盖所有接入方，收益最高 |
+| 已知精确 id | `VIEW_ID` 精确 | 最稳定，B 站 `count_down` 即此类 |
+| 带倒计时的按钮 | `TEXT` + `PREFIX` | `EXACT` 因文本动态化必然落空 |
+| 图片按钮无文本 | `DESCRIPTION` + `EXACT`/`CONTAINS` | 但**必须**加 `activityName` 限定 |
+
+#### 匹配模式约束（由测试强制）
+
+| 约束 | 值 | 出处 |
+|---|---|---|
+| `PREFIX` 目标串长度上限 | ≤ 6 | 与匹配时的候选串上限 10 配套 |
+| 匹配时候选串长度上限 | ≤ 10 | 对应 GKD 的 `[text.length<10]` |
+| viewId 后缀长度下限 | ≥ 8 | 过短易误命中 |
+| `DESCRIPTION` + `EXACT`/`CONTAINS` | 必须有 `activityName` | 防止 `desc="关闭"` 这类通用词误点 |
+
+#### 已明确排除的做法
+
+1. **`TEXT` + `EXACT` 匹配开屏文案** —— 文本本质是动态的，必然漏拦。
+2. **`关闭广告` 前缀规则** —— `关闭广告推送通知` 仅 8 字，前缀+长度
+   两重约束仍不足以防假阳性，已全部删除（5 条）。
+3. **微信（`com.tencent.mm`）** —— 无开屏广告；朋友圈是信息流广告，
+   `activityName` 也不可靠。收录它只会带来风险。
+4. **凭推测填写 `activityName`** —— 这是 R6 的核心错误，
+   不可靠的限定比不限定的危害更大（静默失效）。
+
+#### 排障入口
+
+规则页顶部「匹配诊断」卡片，展示：
+最近事件的包名 / 引擎结论（卡在哪一道闸门）/ 当时可用规则数 /
+会话累计事件数与点击数 / 可执行的下一步动作。
+
+设计动机：实测设备 ROM 抑制应用日志，`adb logcat` 不可用，
+诊断必须写在应用自己能读的地方。
 
 ---
 
@@ -1625,6 +1675,502 @@ configurations.configureEach {
    跳过了跳过规则。
 
 
+### 阶段 B 第二轮修复（R6，2026-09-19）—— 规则与真实节点不符
+
+#### 实机现象
+
+R1–R5 修复后，规则确实已入库（`skip_rule = 20`、`domain_rule = 66`、
+`target_app = 88`），但 **`intercept_log` 仍为 0**，
+用户报告 bilibili / 美团 / 美团外卖等仍然有开屏广告。
+
+即：**入库链路通了，匹配链路没通**。
+
+#### 根因：规则是凭常识"编"出来的
+
+真机抓包 B 站开屏节点：
+
+```
+rid  = tv.danmaku.bili:id/count_down
+text = "跳过 1"        ← 带倒计时
+clickable = true
+```
+
+而当时写的三条 B 站规则：
+
+| 规则 | 定位值 | 结果 |
+| --- | --- | --- |
+| viewId | `tv.danmaku.bili:id/skip` | ❌ 该 id 不存在（凭空捏造） |
+| TEXT EXACT | `跳过广告` | ❌ 实际文本是「跳过 1」 |
+| TEXT EXACT | `跳过` | ❌ 实际文本是「跳过 1」 |
+
+**三条全落空** → `NO_NODE_MATCH`。
+
+#### 三个设计层面的错误
+
+1. **`TEXT + EXACT` 匹配动态文案 → 必然漏拦**。
+   开屏按钮的文本本质就是动态的（带倒计时），用精确匹配注定失败。
+2. **"宁可漏拦"被落地成"只用 EXACT"** → 从"保守"变成"必然失效"。
+3. **缺少通用规则层**。真实方案（GKD 的全局组、SKIP 的 SDK id 复用）
+   无一例外都有这一层，当时完全没有。
+
+#### 竞品方案调研（不局限于单台机器）
+
+调研文档见 `reference/SKIP_RULE_RESEARCH.md`。关键结论：
+
+| 方案 | 做法 | 对本项目的启示 |
+| --- | --- | --- |
+| **GKD** | 全局规则 `[text*="跳过"][text.length<10][visibleToUser=true]` | 「包含 + 长度上限 + 可见性」三重约束才是社区共识 |
+| **李跳跳** | `keywords` 默认模糊匹配，`+` 表示前缀匹配 | 前缀匹配有成熟先例 |
+| **SKIP** | B 站同样用 `count_down`；大量复用 SDK 的统一 id | 印证 `count_down` 是正确值 |
+| **穿山甲 SDK** | 跳过按钮 id 固定为 `tt_splash_skip_btn` | **一条规则可覆盖所有接入方** |
+| **快手 SDK** | `ksad_splash_circle_skip_view` | 同上 |
+
+共同点：**开屏按钮几乎都带倒计时**；**各方案都保留文本兜底**；
+**`activityIds` 普遍不写**。
+
+#### 修复内容（R6）
+
+**1. 新增 `MatchMode.PREFIX`（前缀匹配 + 长度上限）**
+
+对应李跳跳的 `+` 修饰符与 GKD 的 `[text.length<10]`。
+
+⚠️ **前缀匹配单独用并不安全**。曾以为"正文不会以『跳过』开头"，
+但测试里的反例 `跳过此步可在设置中重新开启` 正是以「跳过」开头 ——
+这个理由是错的。因此 `UiMatcher.matchesPrefix` 附带
+`MAX_PREFIX_CANDIDATE_LENGTH = 10` 的长度上限。
+
+**2. viewId 后缀匹配（`*tt_splash_skip_btn`）**
+
+SDK 按钮 id 的**包名前缀随宿主而异**（`com.byted.pangle:id/...` 或
+`com.cainiao.wireless:id/...`），后缀才是稳定的。用伪前缀 `*`
+表示后缀匹配，一条规则覆盖所有接入方 —— 收益最高的一项改动。
+
+**3. 通用规则层（伪包名 `*`）**
+
+`S1RuleCache` 将 `packageName == "*"` 的规则单独存放，查询时
+附加到每个已纳管应用。**不预烤进 map**：预烤会让内存与重建开销
+随「纳管应用数 × 通用规则数」放大。
+
+> ⚠️ **安全契约**：通用规则**同样受"应用必须被纳管"约束**。
+> 首版实现中 `if (own.isNullOrEmpty()) return global` 存在缺陷 ——
+> 未纳管应用既不在 `byPackage`、又因此分支拿到通用规则，
+> 导致在用户从未授权的应用上执行点击。
+> 已修正为**先判 `isManaged`**，并由 `S1RuleCacheTest` 钉死。
+
+**4. `SkipDiagnostics` 实时诊断**
+
+实测设备的 ROM 把 `log.tag.NoAdAccessibility` 设为 Silent，
+`adb logcat` 完全无输出且无 root 无法更改。因此把引擎判定结果
+写入内存 `StateFlow`，在规则页展示"卡在哪一道闸门 + 下一步动作"。
+
+用内存而非 DB：诊断非审计数据，不值得付一次 `Migration(2,3)`。
+
+#### 规则文件重写（version 1 → 2）
+
+三层结构：**通用层（伪包名 `*`）→ 应用专属 viewId → 应用专属文本兜底**。
+
+- 通用层 4 条：`*tt_splash_skip_btn`(p20)、`*ksad_splash_circle_skip_view`(p20)、
+  `*ksad_splash_skip_view`(p18)、`TEXT PREFIX "跳过"`(p10)
+- B 站：`count_down`(p100) + `splash_button_container`(p80) + `PREFIX "跳过"`(p60)
+- 其余 12 个应用：`TEXT PREFIX "跳过"`
+
+**已删除**：微信整组（无可靠 activity 名、朋友圈是信息流广告）、
+全部 `关闭广告` PREFIX 规则（5 条，`关闭广告推送通知` 8 字未超上限，
+前缀+长度两重约束仍不足以防假阳性）。
+
+最终：**15 个应用组 / 21 条规则**（含通用组）。
+
+#### 由测试捕获的 3 个真实缺陷
+
+| # | 缺陷 | 修正 |
+| --- | --- | --- |
+| 1 | PREFIX 单独用不足以防正文（`跳过此步...` 反例） | 加长度上限 10 |
+| 2 | `关闭广告` PREFIX 仍有假阳性 | 删除全部 5 条 |
+| 3 | `desc="关闭"` 这类通用词缺 activity 限定 | 加测试强制要求 |
+
+#### 教训（R6 新增，写进验收清单）
+
+1. **规则必须来自实证，不能来自常识**。
+   "某应用大概有个叫 skip 的按钮"这类推断，一次都不该出现在规则文件里。
+2. **竞品调研是规则库的建设手段，不是可选项**。
+   单机抓包只能覆盖手边的应用，且开屏时机难以捕捉；
+   社区规则库与 SDK 文档才是可规模化的证据来源。
+3. **测试是发现规则设计缺陷的有效工具，不只是防回归**。
+   本轮 3 个缺陷全部由测试捕获，而非由实机发现。
+4. **通用规则层是必需品**。SDK 统一 id 的复用收益远高于逐应用登记，
+   但必须配合"纳管即授权"的安全闸门。
+
+#### 验证证据（R6）
+
+```
+./gradlew testDebugUnitTest --rerun-tasks   → BUILD SUCCESSFUL
+182 tests completed, 0 failed, 0 skipped
+./gradlew compileDebugKotlin                → 0 error, 0 warning
+```
+
+> 实机验证由用户执行。本轮按用户明确界定的交付标准：
+> **不跑实机测试、不构建完整 APK**，以"代码编译无问题 + 单测全绿"为交付条件。
+
+
+### 阶段 B 第三轮修复（R7，2026-09-19）—— 启动应用半秒延迟
+
+#### 现象
+
+用户报告：**"广告拦截关闭成功，但是启动任何应用时存在一个半秒左右的明显延迟"**。
+
+注意这条反馈的性质——它不是"拦截失效"，而是**拦截生效后引入的副作用**。
+拦截逻辑跑在 `onAccessibilityEvent` 回调里，这个回调**默认就在主线程**，
+所以任何同步的重活都会直接吃掉启动阶段的帧预算。
+
+#### 根因（三个叠加来源）
+
+| # | 来源 | 机制 | 量级 |
+| --- | --- | --- | --- |
+| 1 | **点击在主线程同步执行** | `ClickExecutor.execute` 内含 `findByIndex` 全树 BFS 回查 + `ACTION_CLICK`/`getParent` IPC，失败时回落到 `dispatchGesture`（手势播放本身约 40ms） | 单次 50–300ms |
+| 2 | **每个相关事件都遍历整树** | 已纳管应用启动时内容变化事件可达数十次，每次都 `rootProvider()` + `UiTreeScanner.scan()`；500 节点界面 = 数百次 `getChild` IPC | 累计数百 ms |
+| 3 | **`notificationTimeout = 100ms`** | 事件被系统合并，额外引入最多 100ms 延迟 | 最多 100ms |
+
+三者叠加，正好落在用户感知到的"半秒"区间。
+
+#### 修复（四项）
+
+**① 廉价预筛 `EventPreFilter`（新增核心）**
+
+在遍历节点树之前，先用**事件自带的 text / contentDescription**做一次无 IPC 的
+字符串预筛。事件文本与所有已纳管规则都不沾边时，直接 `Ignored(PRE_FILTERED)`
+返回，一次节点读都不做。
+
+```kotlin
+// EventProcessor.processInternal 第 2.5 道闸（在第一道包名闸之后）
+if (!eventMayMatch(event, packageName)) {
+    return ProcessOutcome.Ignored(SkipReason.PRE_FILTERED, packageName, rules.size)
+}
+```
+
+**⚠️ 核心不变式：预筛只放宽、不收紧。**
+
+预筛一旦比权威实现 `UiMatcher` 更严格，就会产生"事件被预筛丢弃、永远走不到匹配"
+的**静默漏拦**——而且现象与"规则写错"完全一致，极难排查。所以：
+
+- 规则集为空 → 放行（`false` 由调用方处理）
+- 任何 `VIEW_ID` / `COORDINATE` 型规则 → **整体放行**
+  （`AccessibilityEvent` 没有 `viewIdResourceName`，那是 `AccessibilityNodeInfo` 才有的属性，
+  从事件侧根本无法判断 viewId 规则是否命中）
+- 任何 `REGEX` 型规则 → **整体放行**（正则与纯字符串前缀匹配不等价）
+- 事件无任何文本候选 → 放行（信息不足时绝不能替权威实现做否决）
+- **不做 activity 预筛** —— activity 过滤是纯字符串比较、无 IPC 成本，
+  交给权威实现 `filterByActivity` 即可；自己实现一遍必然引入语义偏差
+
+这条不变式由 `EventPreFilterTest` 里的
+`givenRealWorldSkipTexts_whenMatcherHits_thenPreFilterAlwaysPasses` 强制守护：
+枚举真实文案，逐条断言「`UiMatcher` 命中 ⇒ 预筛必然放行」。
+
+**② 点击投递到后台线程**
+
+`performAction` / `getChild` 是 IPC 调用，**不受"必须主线程"约束**。
+点击改为投递到 `ioScope` 的 `Dispatchers.Default`：
+
+```kotlin
+val scope = handoffScope ?: return ProcessOutcome.Deferred(best.rule.name, packageName, rules.size)
+scope.launch(handoffContext) { performClick(best, packageName, activityName, rules.size) }
+return ProcessOutcome.ClickScheduled(best, packageName, rules.size)
+```
+
+新增 `ProcessOutcome.ClickScheduled`（已投递）与 `ProcessOutcome.Deferred`（无 scope，
+显式暴露而非静默丢弃）。**注意 `ClickScheduled` 不计入 `totalClicks`** ——
+投递不等于点击成功，统计口径不能被乐观化。
+
+**③ `notificationTimeout` 归零**
+
+`EVENT_TIMEOUT_MS` 从 `100L` 改为 `0L`：把及时性换回来。
+降频职责已经由预筛承担，再叠加 100ms 合并没有意义。
+
+**④ Room 启用 WAL**
+
+`NoAdDatabase.build()` 追加 `.setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)`。
+默认 `AUTOMATIC` 在部分 OEM ROM 上落到 TRUNCATE 模式，每次写事务都要重建 journal
+文件并 fsync 落盘；而拦截日志恰好是"启动时高频小写入"的负载特征，
+这笔开销正好叠在冷启动路径上。WAL 把随机写转为顺序追加，且读写不互斥。
+
+#### 诊断扩展（供用户实机核对）
+
+`SkipDiagnosticsState` 新增 `lastCostMs` / `maxCostMs` / `slowEventCount`，
+并新增常量 `FRAME_BUDGET_MS = 16L`、`SLOW_EVENT_THRESHOLD_MS = 100L`，
+派生属性 `hasFrameDrop`。规则页诊断卡片新增一行：
+
+```
+单次处理耗时：最近 Nms · 峰值 Mms
+```
+
+**用户实机自检方法**：打开规则页看诊断卡片，若峰值长期低于 16ms，
+说明修复到位；若仍有百毫秒级峰值，该数字直接指出问题仍在主线程路径上。
+
+#### 由测试捕获的设计缺陷（R7）
+
+| # | 缺陷 | 修正 |
+| --- | --- | --- |
+| 1 | `EventPreFilter` 中自实现了 activity 预筛，**比权威实现更严格** → 违反"只放宽"不变式 → 静默漏拦 | 彻底移除 activity 预筛，参数保留但标 `@Suppress("UNUSED_PARAMETER")`，理由写进 KDoc |
+| 2 | 测试用"无关内容"当候选，失败归因被 activity 干扰，无法隔离真正要验证的点 | 改用 `"跳过 1"` 使文本匹配成立，测试重命名为 `givenActivityScopedRule_whenActivityDiffersButTextMatches_thenPassesThrough` |
+
+> 第 1 条是 R7 最有价值的产出：**它是测试抓出来的，不是实机抓出来的**。
+> 如果放任不管，用户会看到"某些应用又拦不住了"，而排查方向会错误地指向规则文件。
+
+#### 验证证据（R7）
+
+```
+./gradlew testDebugUnitTest compileDebugKotlin   → BUILD SUCCESSFUL
+210 tests completed, 0 failed, 0 errors
+12 test classes
+./gradlew clean compileDebugKotlin --rerun-tasks → 0 error, 0 warning
+```
+
+新增测试：
+- `EventPreFilterTest`（17 个）—— 三组划分：①不可筛规则一律放行 ②信息不足一律放行 ③可筛情形 + 核心不变式
+- `SkipDiagnosticsTest`（新增 10 个）—— 耗时记录、峰值单调、`FRAME_BUDGET_MS` 边界（等于不算掉帧）、
+  `PRE_FILTERED` 与 `NO_NODE_MATCH` 必须区分、`ClickScheduled` 不计入点击数
+
+> 实机验证由用户执行，交付标准同上：**编译 0 warning + 单测全绿**。
+
+
+### 阶段 B 第四轮修复（R8，2026-09-19）—— 无障碍"失效"的自愈
+
+#### 现象与前提纠正
+
+用户报告：**"无障碍权限在离开应用界面一段时间或息屏或切换应用等情况之后系统自动又关闭了，想办法使无障碍权限开启后在手机未关机情况下常驻"**。
+
+**这个请求的前提需要先纠正，否则整个方向会错**：
+
+**无障碍权限不存在"常驻"这个状态，因此没有"让它常驻"的实现方式。**
+
+Android 的无障碍是**授权模型**，不是"启动一个服务让它一直活着"：
+
+- 用户在设置里勾选 → 系统把这一条写进 `Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES`
+- 之后**由系统自行决定**何时连接、何时解绑服务实例
+- **没有任何 API 能让应用要求系统"保持连接"**
+
+官方 `AccessibilityServiceInfo` 文档对 `flags` 的说明印证了这一点——
+它描述的是「配置」而非「保持」：
+
+> This field represents a set of flags used for **configuring** an AccessibilityService.
+
+关键推论：**服务被解绑时，设置里的授权记录依然存在。**
+这正是它随后能被系统自动重连的原因。
+
+因此：
+
+| 用户感知 | 实际状态 | 结论 |
+|---|---|---|
+| "权限被自动关了" | 授权还在，只是**服务实例被解绑** | **不需要重新授权** |
+| 真正的问题 | 断开未被及时发现与呈现 | 要做的是**自愈检测**，不是保活 |
+
+#### 明确不做（附理由）
+
+| 方案 | 为什么不做 |
+|---|---|
+| 前台服务 / `AlarmManager` / `JobScheduler` 循环保活 | **对无障碍服务完全无效**。它们影响的是进程优先级，而服务实例的绑定由系统的无障碍管理器决定。纯粹白耗电，且与项目既有决策冲突（`NoAdAccessibilityService` 注释早已写明"不做保活"） |
+| `adb` / Shizuku 写 `Settings.Secure` | 需要用户每 12 小时重新授权调试；且属系统性写操作，影响面超出本应用 |
+| `FLAG_REQUEST_ACCESSIBILITY_BUTTON` 恢复入口 | 用户已选定"只做常规自愈"。且官方文档明确：`targetSdk > 29` 时**运行时设置该 flag 会被忽略**，必须写进 XML 元数据；部分 ROM 不提供该按钮，不能作为依赖 |
+| 隐藏断开事实、只显示"已开启" | 违背项目既有的 UI 诚实性原则（三字段分离的设计初衷就是"不掩盖断开"） |
+
+#### 四项改动
+
+**① 状态模型：区分「可自愈断开」与「未授权」**
+
+`AccessibilityState` 新增：
+
+```kotlin
+val lastDisconnectedAtMillis: Long? = null,   // SystemClock.elapsedRealtime()
+val disconnectReason: DisconnectReason? = null,
+
+/** ⭐ 已授权但当前未连接 —— 最需要自愈的一态 */
+val isDisconnectedButAuthorized: Boolean
+    get() = !serviceRunning && serviceEnabledInSettings
+
+val isNotAuthorized: Boolean
+    get() = !serviceRunning && !serviceEnabledInSettings
+```
+
+新增 `DisconnectReason` 枚举：`SYSTEM_UNBOUND` / `SERVICE_DESTROYED` /
+`USER_DISABLED_IN_SETTINGS` / `UNKNOWN`。
+
+**诚实性约束**：Android **不提供**"服务被解绑的原因"这一 API。
+因此不做任何推测——只区分**确实观察到的**回调路径，其余归 `UNKNOWN`。
+猜一个"大概是内存不足"写进 UI，是拿可信度换好看。
+
+**② 首因优先（first-reason-wins）**
+
+`onUnbind` 与 `onDestroy` 会因**同一次断开**而先后触发，前者信息更具体。
+因此 `onDisconnected` 不接受覆盖：
+
+```kotlin
+disconnectReason = current.disconnectReason ?: reason   // ← 不是 reason ?: current
+```
+
+**这个缺陷正是由测试捕获的**：早期实现写成 `reason ?: current.disconnectReason`，
+等价于"有值就覆盖"，`onDestroy` 依然会盖掉 `onUnbind` 的原因。
+由 `givenAlreadyUnbound_whenOnDestroyCalled_thenDoesNotOverwriteReason` 钉死。
+
+断开时刻同理只在**首次**写入，否则「已断开多久」会被反复刷成「刚刚」。
+
+唯一允许覆盖的是 `markUserDisabledInSettings()` —— 授权记录消失是比
+"系统解绑"更强的信号（那就是用户意图）。
+
+**③ 进程级自愈监听器 `AccessibilityWatchdog`**
+
+| 时机 | 广播 |
+|---|---|
+| 息屏 | `ACTION_SCREEN_ON` |
+| 解锁 | `ACTION_USER_PRESENT` |
+| 开机 | `ACTION_BOOT_COMPLETED` |
+| 授权变化 | `ACCESSIBILITY_STATE_CHANGED`（API 31+） |
+
+三者都是**系统广播**，不受 Android 8+ 后台广播限制。
+在 `NoAdApplication.onCreate` 中**同步启动**（不能塞进异步初始化块——
+息屏广播可能在初始化完成前到达）；`start()` 内部只做注册，真正的状态核对在协程里。
+
+Android 14+ 须传 `Context.RECEIVER_NOT_EXPORTED`，否则抛 `SecurityException`。
+
+**刻意不注册** `ACTION_SCREEN_OFF`：息屏瞬间的状态无意义（屏幕都黑了，
+用户不需要拦截广告）。真正需要"已恢复"的时刻是亮屏与解锁。
+
+**④ 两层刷新分工 + UI 如实呈现**
+
+- **后台**：Watchdog 的广播
+- **前台**：`HomeScreen` 的 `ON_RESUME`（覆盖"从设置页返回"——此时屏幕
+  既没亮起也没解锁，广播不会发）
+
+UI 新增 `DisconnectNotice` 块，**刻意不用 error 配色、主按钮是"前往设置检查"
+而非"去开启"**，并在文案中明确写出「不需要重新授权」——
+从根上消除"我明明开着了它却说我没开"的困惑。
+
+`SettingsScreen` 的副标题同步区分三态。
+
+#### 由测试捕获的设计缺陷（R8）
+
+| # | 缺陷 | 修正 |
+|---|---|---|
+| 1 | `onDisconnected` 写成 `reason ?: current`，`onDestroy` 会覆盖 `onUnbind` 的更具体原因 | 改为首因优先 `current ?: reason` |
+| 2 | **`AccessibilityStateHolder` 直接用 `SystemClock.elapsedRealtime()`，导致整个状态机在 JVM 上无法测试**（`android.jar` 是空壳，方法体全是 `throw`） | 抽出 `internal var clock: () -> Long`，生产用系统时钟、测试注入计数器 |
+
+> 第 2 条是本轮最有价值的产出：状态机决定了 UI 对用户说"去设置"还是"等一等"，
+> 是最不能靠猜的部分，**而它在修改前完全不可测**。注入时钟后，
+> 「已断开多久」的边界（刚断开 / 59 秒 / 1 分 / 59 分 / 1 小时）才变得可验证。
+>
+> 这个缺陷也是测试逼出来的——不是通过阅读代码发现的。
+
+#### 关于测试的诚实边界
+
+`refreshFromSystemSettings` 依赖 `ContentResolver`，项目测试栈**无 Robolectric**，
+在 JVM 上拿不到。因此新增 `internal fun seedSettingsFlagForTest(enabled: Boolean)`
+作为测试写入点，用于验证**由该字段驱动的三态判定**。
+
+**不覆盖**的是设置读取路径本身——那属于 Android 平台行为，由用户实机验证。
+这个边界已在 `AccessibilityStateHolderTest` 的 KDoc 中如实标注，
+不假装覆盖了 `Settings.Secure` 读取。
+
+#### 验证证据（R8）
+
+```
+./gradlew testDebugUnitTest compileDebugKotlin    → BUILD SUCCESSFUL
+231 tests / 13 test classes, 0 failed, 0 errors   （新增 AccessibilityStateHolderTest 21 个）
+./gradlew clean compileDebugKotlin --rerun-tasks  → 0 error, 0 warning
+```
+
+> 实机验证由用户执行，交付标准同上：**编译 0 warning + 单测全绿**。
+
+
+### 阶段 B 功能扩展（R9，2026-09-19）—— 后台保活：进程存活与自恢复
+
+R8 解决的是**无障碍服务连接层**的失效自愈（系统解绑 → 重新连接）。
+R9 解决的是另一层、且完全独立的问题：**应用进程本身被杀**。
+两层互补，不互相替代——连接层自愈的前提是进程还活着；进程死了，
+观察者、看门狗、一切组件都随之消失，必须由进程外的机制拉起。
+
+#### 设计：三层恢复链
+
+进程死亡的恢复不依赖单一机制，而是三条独立通路互为备份：
+
+| 层 | 触发点 | 恢复延迟 | 原理 |
+|---|---|---|---|
+| ① 粘性重启 | `START_STICKY` 服务被杀后系统自行重启 | 秒级~分钟级 | 系统发起的重启不走 `startForegroundService()`，天然豁免后台启动限制；`onStartCommand` 收到 `null` intent 即为粘性重启 |
+| ② 心跳闹钟 | 15 分钟一次性闹钟链（`setAndAllowWhileIdle` 非精确） | ≤15 分钟 | `PendingIntent` 由系统侧持有，**进程死亡不清除已排定闹钟**（只有强制停止/卸载会）——这就是进程被杀后的自启通道 |
+| ③ 系统广播 | `BOOT_COMPLETED` + `MY_PACKAGE_REPLACED` | 重启后/更新后 | 官方 FGS 后台启动豁免路径；更新会清空全部闹钟，`MY_PACKAGE_REPLACED` 负责重建链条 |
+
+关键实现决策：
+
+- **闹钟链用一次性自续期而非 `setRepeating`**：每次心跳触发时重新读
+  一次用户设置（用户可能已关闭），`setRepeating` 做不到这一点。
+- **心跳失败也必须重排**（`TRY_START_AND_RESCHEDULE` 字面契约）：
+  非精确闹钟触发时的 FGS 启动**不保证**豁免后台启动限制，某次启动
+  被拒时闹钟已消费——此刻不重排，链条静默断裂，保活在无声中死亡。
+  失败 → 下一次心跳重试，是唯一自愈路径。
+- **粘性重启的镜像乐观策略**：`KeepAliveRuntime` 三态镜像
+  （null=未同步）。粘性重启时镜像尚未同步选**乐观恢复**——误恢复由
+  Application 观察者流毫秒级纠正；误停止则要等最长一个心跳周期才恢复，
+  恰是被杀风险最高时段。唯一硬约束：镜像**明确 false** 必须停止。
+- **接收器读 DataStore 权威值而非内存镜像**：BOOT/更新路径下进程刚
+  被拉起，镜像必然是 null，读权威值避免启动竞态。
+- **非精确闹钟（`setAndAllowWhileIdle`）**：精确闹钟在 Android 13+
+  需 `SCHEDULE_EXACT_ALARM` 特殊权限且默认被拒，授权门槛不可接受；
+  15 分钟间隔 > Doze 每应用 9 分钟合并窗口，漂移无关紧要。
+- **时钟用 `ELAPSED_REALTIME_WAKEUP`**：单调时钟，不受改时间/时区影响。
+
+#### FGS 后台启动豁免矩阵（Android 官方文档核实）
+
+保活的各触发点分别命中的豁免：
+
+| 触发点 | 豁免依据 | 备注 |
+|---|---|---|
+| 粘性重启 | 系统自行重启服务不受后台启动限制约束 | `onStartCommand(null)` 内调 `startForeground()` 合法 |
+| `BOOT_COMPLETED` / `MY_PACKAGE_REPLACED` 接收器 | 官方豁免清单明确列入 | Android 15 `FGS_BOOT_COMPLETED_RESTRICTIONS` 限制 BOOT 只能启动 6 类 FGS，**`SPECIAL_USE` 在白名单内** |
+| 电池优化豁免（用户授予） | 官方豁免清单明确列入 | 对努比亚等激进 ROM 是关键通路，设置页提供直达入口 |
+| 心跳闹钟 | **不保证豁免**（官方只列精确闹钟） | 因此接收器侧启动全部 try/catch，失败等下次心跳 |
+
+#### 诚实边界：force-stop 无法自启
+
+「设置 → 应用 → 强制停止」会将应用置入 stopped state，**此后任何
+应用级机制（闹钟、广播、粘性重启）都无法自启**——这是 Android 的
+安全设计，任何保活库都绕不过。三层恢复链覆盖的是**系统回收**
+（内存压力杀进程）场景，与 force-stop 是两回事，文档与 UI 均不夸大。
+
+#### 双开关语义
+
+「后台保活」与「开机自启动」是两个独立开关，门控关系：
+
+- 保活开关：管「运行期不被杀 + 被杀自恢复」（粘性重启、心跳、
+  更新后恢复都只看它）。
+- 自启开关：只管「设备重启后恢复保活」。BOOT 门控 = `keepAlive && autostart`。
+- **更新后恢复只看保活开关**：更新是用户主动行为，与「重启后别
+  自己动」的用户意图无关。
+- 设置页副标题表述约束：自启开关写「设备重启后恢复后台保活」，
+  **不能写「恢复拦截」**——已授权的无障碍服务在重启后由系统自动
+  重新绑定（TalkBack 依赖此行为），与这两个开关无关。
+
+#### 组件清单（R9）
+
+| 组件 | 职责 |
+|---|---|
+| `KeepAlivePolicy` | 纯决策层（internal object，JVM 可测），锁死两条不变式：明确关闭不得自复活；开启后每个触发点尝试恢复 |
+| `KeepAliveRuntime` | 设置的三态内存镜像（null/true/false），供粘性重启零延迟判断 |
+| `KeepAliveScheduler` | 心跳闹钟排期/取消，显式 Intent PendingIntent（不进 manifest filter，无第三方触发面） |
+| `KeepAliveService` | specialUse 前台服务，低优先级静默通知渠道（`IMPORTANCE_LOW`，Android 13+ 通知权限拒绝不阻断服务运行） |
+| `KeepAliveReceiver` | BOOT/更新/心跳三分发，`goAsync()` + IO 协程读 DataStore 权威值 |
+| 接线点 | `NoAdApplication` 单一观察者：保活设置变化 → 更新镜像 + 启停服务；`SettingsScreen` 仅写设置 |
+
+#### 验证证据（R9）
+
+```
+./gradlew :app:compileDebugKotlin → BUILD SUCCESSFUL, 0 error, 0 warning
+./gradlew :app:testDebugUnitTest  → BUILD SUCCESSFUL
+243 tests / 14 test classes, 0 skipped, 0 failed, 0 errors
+  （新增 KeepAlivePolicyTest 12 个：粘性重启三态、BOOT 四组合、
+    更新两态、心跳两态、Doze 窗口不变式）
+```
+
+> 实机验证由用户执行（重点：杀进程后观察通知恢复、重启设备后
+> 双开关组合行为、电池豁免页跳转），交付标准同上。
+
+
 ### 阶段 C：网络层公共模块
 8. `VpnArbitrator`（让位仲裁）—— **最高优先**
 9. `DnsPacketParser`（`DomainRuleEngine` 已完成）
@@ -1673,7 +2219,8 @@ configurations.configureEach {
 | **S3 完整 TCP 栈实现难度** | 🔴 高 | 先用方案 C（域名级丢包） |
 | **DNS 循环（漏 protect）** | 🔴 高 | 代码审查必查；单测覆盖 |
 | **Android 13+ 侧载限制** | 🟡 中 | 图文引导 + Shizuku 自动解除（S4 路径） |
-| **厂商 ROM 保活** | 🟡 中 | 引导后台白名单 + 前台服务 |
+| **厂商 ROM 保活** | 🟡 中 | VPN 前台服务（S2/S3 需要，与 S1 无关）。**注意 S1 无障碍不适用保活**——见 R8 章节：无障碍是授权模型，前台服务/JobScheduler 对其完全无效 |
+| **S1 服务被系统解绑** | 🟡 中 | **不做保活**（无效）。改为自愈检测：`AccessibilityWatchdog` 在息屏/解锁/授权变化时主动核对状态并如实呈现（R8） |
 | **S2/S3 模式切换抖动** | 🟡 中 | 重建 TUN 时给 UI 明确过渡状态 |
 | **上游 DNS 不可用** | 🟡 中 | fallback DNS + 超时熔断 |
 | **S1 误点** | 🟡 中 | 包名+Activity 双限定 + 高精度匹配优先 |
@@ -1800,7 +2347,8 @@ NoAd 的**所有核心功能必须完整可用**，只是没有增强项。
 | Q1 | **默认模式**选 `DNS_ONLY` 还是 `FULL_TRAFFIC`？ | 首次使用体验与默认权限申请 | 建议 `DNS_ONLY`（性能好、影响面小） |
 | Q2 | **S3 实现深度**：先做域名级丢包，还是直接上完整转发？ | 工作量差异很大 | 建议先做方案 C |
 | Q4 | **是否保留「仅 S1」快速模式**？ | 低配设备体验 | 建议保留（`OFF` 模式即是） |
-| Q5 | **是否引入前台服务保活**？ | 常驻通知与稳定性 | 建议引入，由设置开关控制 |
+| Q5 | **是否引入前台服务保活**？ | 常驻通知与稳定性 | 建议引入，由设置开关控制。**仅针对 S2/S3 的 VpnService**——S1 无障碍不受益（R8） |
+| **Q6** | ~~S1 无障碍是否做保活~~？ | — | **✅ 已定论（R8）：不做**。无障碍是授权模型，前台服务/JobScheduler 对其绑定无影响；改为自愈检测 |
 | **SQ1** | 是否引入 Shizuku 依赖？ | 决定整个增强层是否存在 | 建议引入，但严格保持可选 |
 | **SQ2** | Chain-3 是否作为正式 S4 策略纳入方案？ | 影响架构文档与实现路线 | **✅ 已采纳**（本文已将其登记为 S4） |
 | **SQ3** | Private DNS 与 S2 自建 DNS 如何共存？ | 网络页 UI 复杂度 | 建议都提供，Private DNS 定位为懒人模式 |
