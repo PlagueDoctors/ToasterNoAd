@@ -1,10 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    颜色资源。
+
+    ## 只放启动图标需要的颜色
+
+    应用内的所有颜色都定义在 `ui/theme/Color.kt`（Compose 色板），
+    此处**不应**再定义一套语义色 —— 两套色板必然产生漂移。
+
+    曾经存在的模板色（purple_200/500/700、teal_200/700）已移除：
+    它们与项目实际色板（翡翠青）无关，且无任何代码引用，
+    属于 Android Studio 模板残留。
+
+    ## 为什么图标色值在这里硬编码
+
+    启动图标是**静态资源**，在 Compose 主题建立之前就要被系统读取
+    （甚至在被启动器读取时应用进程还没起来）。
+    因此它无法引用 Compose 色板，只能在此登记。
+    这里的值必须与 `ui/theme/Color.kt` 的 EmeraldPrimary 家族保持一致。
+-->
 <resources>
-    <color name="purple_200">#FFBB86FC</color>
-    <color name="purple_500">#FF6200EE</color>
-    <color name="purple_700">#FF3700B3</color>
-    <color name="teal_200">#FF03DAC5</color>
-    <color name="teal_700">#FF018786</color>
-    <color name="black">#FF000000</color>
-    <color name="white">#FFFFFFFF</color>
+    <!-- 启动图标背景渐变的基准色，对应 Color.kt 的 Emerald 家族 -->
+    <color name="ic_launcher_background_dark">#0B3A2E</color>
+    <color name="ic_launcher_background_mid">#0E5C46</color>
+    <color name="ic_launcher_background_light">#0A7D5E</color>
+
+    <!-- 图标前景（图形）颜色。纯白以保证在各厂商遮罩与主题化图标下均可辨识 -->
+    <color name="ic_launcher_foreground">#FFFFFFFF</color>
 </resources>

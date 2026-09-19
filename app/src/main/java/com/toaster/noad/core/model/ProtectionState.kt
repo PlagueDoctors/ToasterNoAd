@@ -61,16 +61,54 @@ enum class VpnYieldReason(val label: String) {
 
 /**
  * 无障碍服务状态（S1）。
+ *
+ * ## 三个字段为什么要分开
+ *
+ * 「无障碍生效」实际上是**三个独立条件的与**：
+ *
+ * 1. 用户在系统设置里授权了 NoAd 的服务（[serviceEnabledInSettings]）
+ * 2. 系统真的把服务连上了（[serviceRunning]）——
+ *    授权后服务可能因内存压力被系统解绑
+ * 3. 用户在 NoAd 应用内没有关掉 S1 开关（[appSwitchEnabled]）
+ *
+ * 把它们混成一个布尔值会产生误导：用户看到"已开启"却在拦截日志里
+ * 一条记录都没有，却不知道是哪一环断了。
  */
 data class AccessibilityState(
+    /** 系统是否已连接本服务（运行时事实，最可靠的信号） */
     val serviceRunning: Boolean = false,
+
+    /** 用户是否已在系统设置中授权本服务 */
     val serviceEnabledInSettings: Boolean = false,
+
+    /** 用户在 NoAd 应用内是否开启了 S1 拦截开关 */
+    val appSwitchEnabled: Boolean = false,
+
     /**
      * 是否被 Android 13+ 的「受限设置」阻止开启。
      * 侧载应用默认为 true，需要用户手动放行或借助 Shizuku 解除。
      */
     val restrictedBySideload: Boolean = false,
-)
+) {
+    /**
+     * S1 是否**真正在生效**。
+     *
+     * 要求服务正在运行且应用内开关已开。
+     * 注意不以 [serviceEnabledInSettings] 为必要条件：
+     * 服务能跑起来就说明系统已授权，该字段只是兜底信号
+     * （系统设置读取有缓存延迟，不应反过来否认真实运行状态）。
+     */
+    val isEffectivelyActive: Boolean
+        get() = serviceRunning && appSwitchEnabled
+
+    /**
+     * 是否需要引导用户去系统设置。
+     *
+     * 授权已存在时不提示，避免用户已经开好了还被反复引导。
+     */
+    val needsSystemPermission: Boolean
+        get() = !serviceRunning && !serviceEnabledInSettings
+}
 
 /**
  * 统一保护状态。

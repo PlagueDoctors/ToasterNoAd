@@ -7,12 +7,18 @@ import com.toaster.noad.core.data.repository.DomainRuleRepository
 import com.toaster.noad.core.data.repository.LogRepository
 import com.toaster.noad.core.data.repository.RuleRepository
 import com.toaster.noad.core.data.repository.TargetAppRepository
+import com.toaster.noad.core.data.rules.BuiltinRulesLoader
 import com.toaster.noad.core.data.settings.SettingsRepository
 import com.toaster.noad.core.database.NoAdDatabase
 import com.toaster.noad.core.database.entity.DomainRuleEntity
+import com.toaster.noad.core.service.AccessibilityStateHolder
+import com.toaster.noad.core.service.ProtectionFlags
+import com.toaster.noad.core.repository.S1RuleCache
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 
 /**
@@ -62,6 +68,31 @@ class AppContainer(private val context: Context) {
     val settingsRepository: SettingsRepository by lazy {
         SettingsRepository(context)
     }
+
+    /**
+     * S1 规则内存缓存（进程内单例）。
+     *
+     * 必须由容器持有而非在服务内构造：无障碍服务可能被系统
+     * 反复连接/解绑，每次都新建缓存会导致
+     * 「订阅 Flow 重建快照」的开销重复发生，且两个实例间状态不一致。
+     *
+     * 用 [applicationScope] 作为订阅作用域：缓存的存活周期
+     * 应等于进程生命周期，而非某个服务的连接周期。
+     */
+    val s1RuleCache: S1RuleCache by lazy {
+        S1RuleCache(
+            targetAppRepository = targetAppRepository,
+            ruleRepository = ruleRepository,
+            scope = applicationScope,
+        )
+    }
+
+    /**
+     * 应用级协程作用域。
+     *
+     * 供 [s1RuleCache] 等需要跨服务生命周期的组件订阅数据流。
+     */
+    val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 }
 
 /**
@@ -91,6 +122,23 @@ class NoAdApplication : Application() {
         super.onCreate()
         container = AppContainer(this)
 
+        // 立即同步保护开关到内存镜像。
+        // 必须在初始化任务之前：无障碍服务可能在应用进程刚启动时
+        // 就被系统唤起（例如开机后用户直接打开某个应用），
+        // 此时若镜像尚未同步，事件回调会因读到默认 false 而静默失效。
+        ProtectionFlags.syncFrom(
+            scope = applicationScope,
+            protectionEnabledFlow = container.settingsRepository.protectionEnabled,
+            accessibilityEnabledFlow = container.settingsRepository.accessibilityEnabled,
+        )
+
+        // 同步应用内 S1 开关到 UI 状态持有者。
+        // 与 ProtectionFlags 分开的原因：前者服务于无障碍事件热路径（无锁布尔），
+        // 后者服务于 UI（StateFlow，需要携带完整状态）。
+        container.settingsRepository.accessibilityEnabled
+            .onEach(AccessibilityStateHolder::setAppSwitchEnabled)
+            .launchIn(applicationScope)
+
         applicationScope.launch {
             initializeDomainRules()
             pruneUninstalledTargetApps()
@@ -98,13 +146,38 @@ class NoAdApplication : Application() {
         }
     }
 
-    /** 加载并编译域名规则到内存引擎；首次启动时导入内置规则 */
+    /**
+     * 加载并编译域名规则到内存引擎。
+     *
+     * ## 导入策略
+     *
+     * 内置规则来自 assets，解析与写库都失败时**不阻塞启动**（外层 runCatching）。
+     * 判定「需要导入」的条件同时检查黑名单与白名单：
+     * 只检查黑名单会让「白名单丢失但黑名单存在」的中间态永远不被修复。
+     *
+     * ## 幂等性
+     *
+     * `dao.insertAll` 使用 `OnConflictStrategy.IGNORE` 且
+     * `(pattern, is_whitelist)` 有唯一索引，因此重复启动不会产生重复规则。
+     */
     private suspend fun initializeDomainRules() {
         runCatching {
             val repo = container.domainRuleRepository
-            if (!repo.hasBuiltinRules()) {
-                repo.importBuiltin(BuiltinDomainRules.rules)
+
+            val blacklistMissing = !repo.hasBuiltinRules()
+            val whitelistMissing = repo.builtinWhitelistCount() == 0
+
+            if (blacklistMissing || whitelistMissing) {
+                // 读取 + 解析都放在 IO 线程（本函数运行于 Dispatchers.IO）
+                val loaded = BuiltinRulesLoader.load(this)
+                if (loaded.totalCount > 0) {
+                    repo.importBuiltin(
+                        blacklist = loaded.blacklist,
+                        whitelist = loaded.whitelist,
+                    )
+                }
             }
+
             repo.rebuildEngine()
         }
     }
@@ -142,37 +215,27 @@ class NoAdApplication : Application() {
 }
 
 /**
- * 内置域名规则占位。
+ * 内置域名规则入口。
  *
- * ## 为什么是占位而非大规模列表
+ * ## 已定方案（2026-09-19）
  *
- * 内置规则规模属于待决策项（见 `THREE_STRATEGY_PLAN.md` Q3）。
- * 大规模导入会带来误杀风险与维护成本，需要先用实测数据支撑。
+ * 规则**不再硬编码为 Kotlin 常量**，改为放在
+ * `app/src/main/assets/rules/builtin_domains.json`，由 [BuiltinRulesLoader] 解析。
  *
- * 当前只放最小可用集合：仅覆盖业界公认的、几乎不可能误杀的广告与追踪域名，
- * 目的是**让 S2/S3 的过滤链路可端到端验证**，而非追求拦截率。
+ * 决策依据：
  *
- * 后续应替换为经过筛选的公开列表（如 AdAway hosts 源转换），
- * 并配合白名单机制控制误杀。
+ * 1. **规模**：起步集约 60 条黑名单 + 6 条白名单。刻意保持精简 ——
+ *    内置规则的价值是「零误杀地覆盖高共识广告域」，而不是追求拦截率。
+ *    大规模列表（数万条）应由用户按需在规则页导入，避免默认配置就产生误杀。
+ * 2. **白名单必须与黑名单同批导入**：文件中登记的若干白名单条目是为了
+ *    显式放行「有误杀风险」的域名（如友盟同时承载崩溃上报）。
+ *    若只导入黑名单，这层防护会静默失效。
+ * 3. **数据与代码分离**：规则会持续演进，放 assets 便于审阅、diff 与替换，
+ *    且不随规则增长而膨胀 dex。
+ *
+ * 规则的选取标准与审计要求见 JSON 文件内的 `meta.criteria` / `meta.auditNote`。
  */
 object BuiltinDomainRules {
-
-    val rules: List<com.toaster.noad.core.model.DomainRule> = listOf(
-        // 占位示例：这些是广为人知的广告/追踪域名，仅用于验证过滤链路连通性。
-        // 注意：不是完整列表，不应作为实际拦截能力的依据。
-        rule("doubleclick.net"),
-        rule("googlesyndication.com"),
-        rule("googleadservices.com"),
-        rule("adservice.google.com"),
-    )
-
-    private fun rule(pattern: String) = com.toaster.noad.core.model.DomainRule(
-        matchType = com.toaster.noad.core.model.DomainMatchType.SUFFIX,
-        pattern = pattern,
-        category = com.toaster.noad.core.model.DomainCategory.AD,
-        note = "builtin",
-        enabled = true,
-    )
 
     /** 供 UI 展示的规则来源标识 */
     const val SOURCE = DomainRuleEntity.SOURCE_BUILTIN

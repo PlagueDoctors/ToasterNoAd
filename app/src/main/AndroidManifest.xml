@@ -47,6 +47,33 @@
             </intent-filter>
         </activity>
 
+        <!--
+            S1 无障碍拦截服务。
+
+            权限声明：android:permission 必须为 BIND_ACCESSIBILITY_SERVICE，
+            否则任何应用都能通过 bindService 调用本服务。
+
+            android:exported="true" 是必需的 —— 它由系统（跨进程）绑定。
+
+            tools:ignore="AccessibilityPolicy" 用于抑制 Lint 对
+            无障碍服务用途的检查：本应用的核心功能就是无障碍点击，
+            属于该 API 的正当用途（详见 accessibility_service_description）。
+        -->
+        <service
+            android:name=".core.service.NoAdAccessibilityService"
+            android:exported="true"
+            android:label="@string/accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            tools:ignore="AccessibilityPolicy">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
     </application>
 
 </manifest>

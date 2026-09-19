@@ -40,4 +40,21 @@
     <string name="settings_group_advanced">高级</string>
     <string name="settings_whitelist">白名单</string>
     <string name="settings_about">关于 NoAd</string>
+
+    <!-- 无障碍服务（S1） -->
+    <string name="accessibility_service_label">NoAd 广告拦截</string>
+    <string name="accessibility_service_summary">自动关闭应用开屏与弹窗广告</string>
+    <string name="accessibility_service_description">NoAd 需要无障碍权限来识别应用启动时出现的广告弹窗，并自动点击其「跳过」或「关闭」按钮。\n\n本服务只读取当前界面的按钮文字与控件标识，用于判断是否为广告关闭按钮，不会上传、存储或分享任何界面内容与个人信息。</string>
+
+    <!-- 无障碍引导 -->
+    <string name="a11y_card_title">无障碍拦截</string>
+    <string name="a11y_status_running">运行中</string>
+    <string name="a11y_status_not_enabled">未开启</string>
+    <string name="a11y_status_enabled_not_connected">已授权，等待生效</string>
+    <string name="a11y_action_open_settings">去开启</string>
+    <string name="a11y_action_enable">开启无障碍拦截</string>
+    <string name="a11y_hint_restricted_title">系统限制了此设置</string>
+    <string name="a11y_hint_restricted_message">Android 13 及以上版本会限制从浏览器等渠道安装的应用开启无障碍服务。若在「已下载的应用」中找不到 NoAd，请点击右上角菜单选择「允许受限设置」后重试。</string>
+    <string name="a11y_hint_steps_title">开启步骤</string>
+    <string name="a11y_hint_steps_message">1. 在系统设置中找到「已下载的服务」或「已安装的应用」\n2. 找到「NoAd 广告拦截」\n3. 打开开关并确认授权</string>
 </resources>

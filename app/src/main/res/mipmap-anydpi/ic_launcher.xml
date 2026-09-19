@@ -1,6 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    NoAd 自适应图标（方形遮罩）。
+
+    三层职责：
+    - background：品牌色（翡翠渐变），由系统按各厂商形状裁切
+    - foreground：图形语义（被切断的广告位）
+    - monochrome：Android 13+ 主题化图标，取形状后用系统单色重新着色
+
+    monochrome 单独指向 ic_launcher_monochrome 而非复用 foreground，
+    原因见该文件头部注释。
+-->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background android:drawable="@drawable/ic_launcher_background" />
     <foreground android:drawable="@drawable/ic_launcher_foreground" />
-    <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
 </adaptive-icon>

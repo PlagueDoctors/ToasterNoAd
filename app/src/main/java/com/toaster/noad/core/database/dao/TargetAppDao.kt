@@ -28,6 +28,22 @@ interface TargetAppDao {
     @Query("SELECT COUNT(*) FROM target_app WHERE accessibility_enabled = 1")
     fun observeAccessibilityEnabledCount(): Flow<Int>
 
+    /**
+     * 观察「已启用无障碍拦截」的纳管应用。
+     *
+     * S1 规则缓存（`S1RuleCache`）订阅本查询来重建内存快照：
+     * 无障碍事件回调在主线程，逐次查库会造成卡顿，
+     * 因此必须由 Flow 在变更时推送、缓存侧整体替换。
+     */
+    @Query(
+        """
+        SELECT * FROM target_app
+        WHERE accessibility_enabled = 1
+        ORDER BY sort_order DESC, label ASC
+        """,
+    )
+    fun observeAccessibilityEnabled(): Flow<List<TargetAppEntity>>
+
     @Query("SELECT COUNT(*) FROM target_app")
     fun observeTotalCount(): Flow<Int>
 

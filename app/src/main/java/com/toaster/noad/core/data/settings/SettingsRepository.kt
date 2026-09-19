@@ -54,6 +54,15 @@ class SettingsRepository(private val context: Context) {
     val protectionEnabled: Flow<Boolean> =
         store.data.map { it[KEY_PROTECTION_ENABLED] ?: false }
 
+    /**
+     * S1 无障碍拦截是否启用（用户意图）。
+     *
+     * 供 `ProtectionFlags` 同步到内存镜像 —— 无障碍事件回调在主线程，
+     * 无法在此处做磁盘 IO。
+     */
+    val accessibilityEnabled: Flow<Boolean> =
+        store.data.map { it[KEY_ACCESSIBILITY_ENABLED] ?: false }
+
     val networkFilterMode: Flow<NetworkFilterMode> = store.data.map { prefs ->
         prefs[KEY_NETWORK_FILTER_MODE]
             ?.let { runCatching { NetworkFilterMode.valueOf(it) }.getOrNull() }

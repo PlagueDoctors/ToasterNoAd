@@ -11,12 +11,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.toaster.noad.core.service.AccessibilitySettingsLauncher
 import com.toaster.noad.feature.apps.AppsRoute
 import com.toaster.noad.feature.home.HomeRoute
 import com.toaster.noad.feature.logs.LogsRoute
@@ -34,6 +36,10 @@ fun NoAdApp() {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = backStackEntry?.destination
+
+    // 无障碍设置跳转需要 Context。用 LocalContext 而非把 Context 传进
+    // 各 Screen：后者会把 Android 依赖带进 UI 层，破坏可预览性。
+    val context = LocalContext.current
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -73,6 +79,12 @@ fun NoAdApp() {
                         navController.navigate(NoAdDestination.Network.route) {
                             launchSingleTop = true
                         }
+                    },
+                    onOpenAccessibilitySettings = {
+                        // 返回值表示是否成功跳转。失败时不弹提示：
+                        // 极少数精简 ROM 会移除该入口，此时用户回到设置页
+                        // 手动寻找的路径依然存在，弹窗反而增加困惑。
+                        AccessibilitySettingsLauncher.openAccessibilitySettings(context)
                     },
                 )
             }

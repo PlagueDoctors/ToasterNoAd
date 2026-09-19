@@ -6,6 +6,9 @@ import com.toaster.noad.core.data.repository.DomainRuleRepository
 import com.toaster.noad.core.data.repository.RuleRepository
 import com.toaster.noad.core.data.settings.AppSettings
 import com.toaster.noad.core.data.settings.SettingsRepository
+import com.toaster.noad.core.model.AccessibilityState
+import com.toaster.noad.core.service.AccessibilityStateHolder
+import com.toaster.noad.core.service.ProtectionFlags
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -23,6 +26,8 @@ data class SettingsUiState(
     val domainRuleCount: Int = 0,
     /** 域名白名单条数 */
     val domainWhitelistCount: Int = 0,
+    /** S1 无障碍服务的真实运行状态 */
+    val accessibility: AccessibilityState = AccessibilityState(),
     val isLoading: Boolean = true,
 ) {
     /** 域名黑名单条数（总数减去白名单） */
@@ -50,12 +55,14 @@ class SettingsViewModel(
         ruleRepository.observeEnabledCount(),
         domainRuleRepository.observeTotalCount(),
         domainRuleRepository.observeWhitelistCount(),
-    ) { settings, skipCount, domainCount, whitelistCount ->
+        AccessibilityStateHolder.state,
+    ) { settings, skipCount, domainCount, whitelistCount, a11y ->
         SettingsUiState(
             settings = settings,
             skipRuleCount = skipCount,
             domainRuleCount = domainCount,
             domainWhitelistCount = whitelistCount,
+            accessibility = a11y,
             isLoading = false,
         )
     }.stateIn(
@@ -78,6 +85,19 @@ class SettingsViewModel(
 
     fun setShizukuEnhancementsEnabled(enabled: Boolean) {
         viewModelScope.launch { settingsRepository.setShizukuEnhancementsEnabled(enabled) }
+    }
+
+    /**
+     * 切换 S1 无障碍拦截开关。
+     *
+     * 同时写 DataStore（持久化）与内存镜像（热路径），
+     * 后者让无障碍服务在事件回调中立即可见，无需等待 Flow 派发。
+     */
+    fun setAccessibilityEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.setAccessibilityEnabled(enabled)
+            ProtectionFlags.setAccessibilityEnabled(enabled)
+        }
     }
 
     private companion object {

@@ -202,26 +202,53 @@ com.toaster.noad/
   `type` ∈ `feat` / `fix` / `refactor` / `test` / `build` / `docs` / `style` / `chore`
 - **禁止**提交 `local.properties`、`.gradle/`、`build/`、`.idea/` 中的本地配置
 
-## 九、已知待修正项（不要沿用其写法）
+## 九、内置域名规则（assets JSON）
 
-下列写法存在于当前代码中，但**违反本规范**。修改相关文件时应一并纠正，
-且**不得**以「与现有代码保持一致」为由复制这些模式：
+规则**不是** Kotlin 常量，位于 `app/src/main/assets/rules/builtin_domains.json`，
+由 `core/data/rules/BuiltinRulesLoader.kt` 解析。
 
-| 位置 | 问题 |
-|---|---|
-| `feature/home/HomeScreen.kt` | `onClick = {}` 空实现且无标注 |
-| `core/designsystem/StatCard.kt` | 写死 `fontSize = 11.sp` |
-| `ui/theme/Theme.kt` | `SlateOutline` 被深浅两套色板共用 |
-| 各 `Screen.kt` | 界面硬编码中文，未使用 `strings.xml` |
+### 必须
 
-其他需留意的现状：
+- 修改规则文件后**必须**运行 `./gradlew testDebugUnitTest`；
+  `BuiltinRulesAssetTest` 会对真实文件做契约测试
+- 每条规则**必须**有 `note` 说明用途（否则无法审计与移除）
+- 图案必须已归一化：小写、无尾点、无协议前缀、无通配符、无路径/端口
+- **白名单必须与黑名单同批导入**。白名单不是"例外列表"，
+  而是「因误杀风险而显式放行」的登记处；
+  只导入黑名单会让这层防护静默失效
+- 引入新域名前必须评估：该域名是否同时承载业务接口、登录、支付或内容分发？
+  是则**不得**加入黑名单，或必须以白名单形式登记权衡
 
-- 四个 `ViewModel` 均在 `init {}` 中硬编码假数据，尚无 Repository 层与持久化
-- `HomeViewModel` 与 `AppsViewModel` 对同一应用（如 QQ）的启用状态互相矛盾，
-  说明缺少单一事实来源
-- 项目尚无 `.git`，无版本控制基线
+### 禁止
 
-## 十、提交前自查
+- 收录「全家桶」主域（如 `google.com`、`qq.com`、`alibaba.com` 本身）
+- 为追求拦截率而扩大规模 —— 内置集合的价值是「零误杀覆盖高共识广告域」
+
+## 十、应用图标
+
+图标为**完全原创矢量**，零许可风险。相关文件：
+`res/drawable/ic_launcher_{background,foreground,monochrome}.xml`、
+`res/mipmap-anydpi/ic_launcher{,_round}.xml`、`res/mipmap-*dpi/ic_launcher{,_round}.png`。
+
+### 必须
+
+- **矢量与位图必须同步**：几何参数同时存在于 `ic_launcher_foreground.xml`
+  与 `tools/gen_icon_pngs.py`。改其一必须同步另一，否则两种图标形态不一致
+- `ic_launcher_monochrome.xml` 必须与 `ic_launcher_foreground.xml` **完全一致**
+  （刻意不做"单色专属优化"，避免不一致）
+- 添加图形时**只靠不透明度**传递信息，不依赖颜色差异（Android 13+ 主题化图标
+  会取 alpha 形状重新着色）；缺口/镂空必须靠「背景透出」而非「填背景色」
+- 中空图形用「外轮廓 + 内轮廓 + `fillType="evenOdd"`」表达，
+  **不用 `android:strokeWidth`**（部分启动器生成单色图标时会丢弃 stroke）
+- 改动后必须重新运行 `tools/gen_icon_pngs.py` 生成位图
+
+### 禁止
+
+- 恢复 `mipmap-*dpi/*.webp`（Android Studio 模板的绿色机器人图标）
+- 直接引用第三方图标库的路径数据（Material Symbols / Lucide / Phosphor 均可商用
+  但都需保留版权声明，图标常被拆出去单独使用，署名成本不划算）
+
+## 十一、提交前自查
 
 - [ ] 无 `!!`、无空 `catch`、无 `GlobalScope`、无 `println`
 - [ ] 变量优先 `val`，集合对外只读
@@ -234,7 +261,81 @@ com.toaster.noad/
 - [ ] 未实现的功能未被伪装成已实现
 - [ ] 未擅自修改锁定的 SDK / 依赖 / 框架版本
 
-## 十一、官方参考
+## 十二、S1 无障碍（阶段 B 已实现）
+
+### 必须
+
+- **匹配逻辑只操作 `NodeSnapshot`，绝不直接持有 `AccessibilityNodeInfo`**。
+  后者无法在 JVM 单测中构造、必须成对 `recycle()`、且只在事件回调期间有效。
+  违反此条会让"该不该点这个节点"完全无法测试 —— 而 S1 是唯一
+  代替用户操作界面的策略，误点可能触发付费。
+- **节点回收统一走 `NodeRecycler.recycle()`**。`recycle()` 自 API 33 起弃用
+  （框架接管生命周期），但 `minSdk = 30`，API 30–32 上不回收是**真实内存泄漏**。
+  不要在调用点 `@Suppress("DEPRECATION")` 后直接删掉回收调用。
+- **事件回调（主线程）内禁止任何数据库访问**。包名判断走 `S1RuleCache`
+  内存快照，开关判断走 `ProtectionFlags` 内存镜像。
+- **一次事件只点一个节点**（`UiMatcher.matchBest` 返回单个最佳匹配）。
+  连续点击多个节点会显著提高误点概率。
+- **窗口切换时必须 `EventProcessor.onWindowChanged()`**（内部 `gate.reset()`）。
+  否则新界面会被上一界面的残留冷却影响，表现为极难复现的"偶发失效"。
+- **点击必须三级降级**：节点自身 `ACTION_CLICK` → 向上找可点击祖先（≤5 层）
+  → 坐标手势。大量广告的跳过 `TextView` 自身 `clickable=false`，
+  真正响应点击的是父容器；缺"找祖先"会表现为"规则正确但点不掉"。
+- **新定位方式必须给置信度**，并保持 `VIEW_ID > TEXT > DESCRIPTION > COORDINATE`。
+- **UI 必须区分两层授权**：系统设置授权服务 + 应用内开关。
+  写文案时不能只说"开启无障碍"，要说明当前缺哪一层。
+
+### 禁止
+
+- 在无障碍服务里做**保活**（前台服务、JobScheduler、AlarmManager 等）。
+  它是系统级服务，本身优先级很高，额外保活只增加耗电与用户困惑。
+- 用"找最近的节点"实现 `COORDINATE` 规则。坐标规则描述的是屏幕上一个点，
+  强行就近匹配会把点击目标改到别处；应合成虚拟节点直接走手势。
+- 请求 `FLAG_RETRIEVE_INTERACTIVE_WINDOWS`。它会让服务接收所有窗口
+  （含输入法、系统弹窗）的事件，徒增开销与误点风险。
+- 在 `EventProcessor` 的回调里用 `runBlocking` 写库。回调声明为 `suspend`，
+  由 `EventProcessor` 自行在 IO 作用域启动协程。
+
+### 服务状态三字段不可合并
+
+`AccessibilityState` 的 `serviceRunning` / `serviceEnabledInSettings` /
+`appSwitchEnabled` 是三个独立事实。合并成一个布尔值会导致
+「界面显示已开启，但拦截日志一条都没有，且用户不知道哪一环断了」。
+判断是否真正生效用 `isEffectivelyActive`。
+
+## 十三、已知待修正项（不要沿用其写法）
+
+以下是当前代码库里客观存在的"临时/占位/违规"实现，**新增代码不要模仿**，改动相关
+文件时顺手修正。
+
+**违反本规范的写法**（不得以「与现有代码保持一致」为由复制）：
+
+| 位置 | 问题 |
+|---|---|
+| `core/designsystem/StatCard.kt` | 写死 `fontSize = 11.sp` |
+| `ui/theme/Theme.kt` | `SlateOutline` 被深浅两套色板共用 |
+| 各 `Screen.kt` | 界面仍有硬编码中文，未全部迁到 `strings.xml` |
+
+**尚未接通的真实数据**（当前为占位实现）：
+
+- **应用列表的图标仍是占位方块** — 尚未接入 `PackageManager` 加载真实图标
+- **无「昨日拦截」区间查询** — 只有总量计数，没有时间区间聚合
+- **S2/S3/S4 的策略状态** — 首页已如实显示为「未接入」，待阶段 C–F 接线
+
+**工程质量缺口**：
+
+- **Detekt / ktlint 尚未引入** — 静态分析门禁缺失，目前只有单元测试
+- **规则管理页尚未实现** — 仓储与 DAO 已就绪，UI 层未接
+- **`NoAdAccessibilityService.DEBUG_LOG` 目前为 `true`** — 发布前必须关闭，
+  否则 logcat 会持续输出每次事件的判定结果
+
+> 已修复（勿回退）：首页策略状态的 `active` 曾写死 `false`，阶段 B 已接入
+> `AccessibilityStateHolder` 的真实状态。
+
+> 处理原则：修一项就删一项，不要在此长期堆积。若某条已确认不打算做，
+> 也要先判定为「不做」并写清原因，而不是让它无限期挂在"待修正"里。
+
+## 十四、官方参考
 
 - Android 架构指南 — https://developer.android.com/topic/architecture
 - Android 应用模块化 — https://developer.android.com/topic/modularization

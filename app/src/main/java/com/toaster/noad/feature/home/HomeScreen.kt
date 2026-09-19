@@ -14,7 +14,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.ArrowForward
+import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.Shield
@@ -32,23 +32,31 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.toaster.noad.core.designsystem.EmptyState
 import com.toaster.noad.core.designsystem.NoAdSection
 import com.toaster.noad.core.designsystem.SectionHeader
 import com.toaster.noad.core.designsystem.StatCard
+import com.toaster.noad.core.model.AccessibilityState
 import com.toaster.noad.core.model.InterceptSource
 import com.toaster.noad.core.navigation.NoAdViewModelFactory
 import com.toaster.noad.ui.theme.NoAdTheme
+import com.toaster.noad.R
 
 /**
  * 首页。
@@ -64,10 +72,26 @@ fun HomeRoute(
     onNavigateToLogs: () -> Unit = {},
     onNavigateToApps: () -> Unit = {},
     onNavigateToNetwork: () -> Unit = {},
+    onOpenAccessibilitySettings: () -> Unit = {},
     viewModel: HomeViewModel = viewModel(factory = NoAdViewModelFactory.Factory),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val blockedBySource by viewModel.blockedBySource.collectAsStateWithLifecycle()
+
+    // 从系统设置返回时重新核对授权状态。
+    // 系统没有提供"无障碍服务被开关"的广播，因此只能在回到前台时主动查询。
+    // 用 LifecycleEventObserver 而非 LaunchedEffect 的原因：
+    // 后者只在首次进入组合时执行一次，无法感知"从设置页返回"。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshAccessibilityState()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val scrollBehavior =
         TopAppBarDefaults.exitUntilCollapsedScrollBehavior(rememberTopAppBarState())
@@ -108,7 +132,7 @@ fun HomeRoute(
                 )
             }
 
-            // ---- 三策略状态 ----
+            // ---- 拦截策略 ----
             item {
                 Column(Modifier.padding(horizontal = 20.dp)) {
                     SectionHeader(
@@ -118,7 +142,29 @@ fun HomeRoute(
                     Spacer(Modifier.height(12.dp))
                     StrategyStatusList(
                         protectionEnabled = uiState.protectionEnabled,
+                        accessibility = uiState.accessibility,
                         bySource = blockedBySource,
+                    )
+                }
+            }
+
+            // ---- 无障碍未开启时的引导 ----
+            // 只在「总开关已开但无障碍未生效」时展示，
+            // 避免用户尚未启用保护就被引导去改系统设置
+            if (uiState.protectionEnabled && !uiState.accessibility.isEffectivelyActive) {
+                item {
+                    AccessibilityGuideCard(
+                        state = uiState.accessibility,
+                        onToggleAppSwitch = {
+                            viewModel.setAccessibilityEnabled(
+                                !uiState.accessibility.appSwitchEnabled,
+                            )
+                        },
+                        onOpenSystemSettings = {
+                            onOpenAccessibilitySettings()
+                        },
+                        onRefresh = viewModel::refreshAccessibilityState,
+                        modifier = Modifier.padding(horizontal = 20.dp),
                     )
                 }
             }
@@ -193,7 +239,7 @@ fun HomeRoute(
                     Text("管理受保护应用")
                     Spacer(Modifier.width(8.dp))
                     Icon(
-                        Icons.Rounded.ArrowForward,
+                        Icons.AutoMirrored.Rounded.ArrowForward,
                         contentDescription = null,
                         modifier = Modifier.height(18.dp),
                     )
@@ -258,22 +304,38 @@ private fun ProtectionToggleCard(
 }
 
 /**
- * 三策略状态列表。
+ * 策略状态列表。
  *
  * 诚实标注：即便总开关打开，各策略也各自可能有未生效的原因
  * （无障碍未授权、VPN 让位、Shizuku 未安装）。此处如实展示，
  * 而不是笼统显示「已保护」。
+ *
+ * S1 已接入真实运行状态；S2/S3/S4 在后续阶段接入，
+ * 当前明确显示为「未接入」而不是伪造成「运行中」。
  */
 @Composable
 private fun StrategyStatusList(
     protectionEnabled: Boolean,
+    accessibility: AccessibilityState,
     bySource: Map<InterceptSource, Int>,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         InterceptSource.entries.forEach { source ->
+            val (active, implemented) = when (source) {
+                InterceptSource.ACCESSIBILITY ->
+                    accessibility.isEffectivelyActive to true
+
+                // 以下三种策略尚未实现，明确标记为未接入
+                InterceptSource.DNS,
+                InterceptSource.VPN,
+                InterceptSource.APP_FIREWALL,
+                -> false to false
+            }
+
             StrategyStatusRow(
                 source = source,
-                active = false, // 阶段 B/C/D 接入真实服务状态后替换
+                active = active,
+                implemented = implemented,
                 protectionEnabled = protectionEnabled,
                 todayCount = bySource[source] ?: 0,
             )
@@ -285,6 +347,7 @@ private fun StrategyStatusList(
 private fun StrategyStatusRow(
     source: InterceptSource,
     active: Boolean,
+    implemented: Boolean,
     protectionEnabled: Boolean,
     todayCount: Int,
 ) {
@@ -298,12 +361,16 @@ private fun StrategyStatusRow(
     val statusText = when {
         !protectionEnabled -> "未启用"
         active -> "运行中"
-        else -> "待接入"
+        // 区分"已实现但未生效"与"尚未开发"：
+        // 前者用户可以通过操作解决，后者只能等待
+        implemented -> "待开启"
+        else -> "未接入"
     }
 
     val statusColor = when {
         !protectionEnabled -> MaterialTheme.colorScheme.onSurfaceVariant
         active -> MaterialTheme.colorScheme.primary
+        implemented -> MaterialTheme.colorScheme.error
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
 
@@ -380,6 +447,149 @@ private fun BlockedAppRow(app: TopBlockedAppItem, modifier: Modifier = Modifier)
                 color = MaterialTheme.colorScheme.primary,
                 fontWeight = FontWeight.SemiBold,
             )
+        }
+    }
+}
+
+/**
+ * 无障碍开启引导卡片。
+ *
+ * ## 为什么需要它
+ *
+ * S1 生效需要**两层**授权，而用户在系统设置的授权环节最容易卡住：
+ * 无障碍列表里条目往往很多，且 Android 13+ 对侧载应用隐藏了开关。
+ * 单靠文字说明很难让用户走完流程，因此这里把状态、原因、动作放在一起。
+ *
+ * ## 文案原则
+ *
+ * 每一步都告诉用户「现在处于哪一环、下一步点哪里」，
+ * 不出现"请开启无障碍"这种没有可操作信息的话。
+ */
+@Composable
+private fun AccessibilityGuideCard(
+    state: AccessibilityState,
+    onToggleAppSwitch: () -> Unit,
+    onOpenSystemSettings: () -> Unit,
+    onRefresh: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        tonalElevation = 1.dp,
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                com.toaster.noad.core.designsystem.IconBadge(
+                    icon = Icons.Rounded.Shield,
+                    tint = MaterialTheme.colorScheme.primary,
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    size = 36.dp,
+                )
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.a11y_card_title),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = when {
+                            state.isEffectivelyActive -> stringResource(R.string.a11y_status_running)
+                            state.serviceRunning ->
+                                stringResource(R.string.a11y_status_enabled_not_connected)
+                            else -> stringResource(R.string.a11y_status_not_enabled)
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            // 分步引导：只显示当前缺失的那一步，避免一次性抛出全部信息
+            when {
+                // 应用内开关未开
+                !state.appSwitchEnabled -> {
+                    Text(
+                        text = stringResource(R.string.a11y_hint_steps_message),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Button(
+                        onClick = onOpenSystemSettings,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Text(stringResource(R.string.a11y_action_open_settings))
+                    }
+                }
+
+                // 应用内开关已开但服务未运行：需要去系统设置授权
+                state.needsSystemPermission -> {
+                    Text(
+                        text = stringResource(R.string.a11y_hint_steps_message),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = onOpenSystemSettings,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp),
+                        ) {
+                            Text(stringResource(R.string.a11y_action_open_settings))
+                        }
+                        OutlinedButton(
+                            onClick = onRefresh,
+                            shape = RoundedCornerShape(12.dp),
+                        ) {
+                            Text("已开启")
+                        }
+                    }
+                }
+
+                // 其余情况：提供手动开关
+                else -> {
+                    Button(
+                        onClick = onToggleAppSwitch,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Text(stringResource(R.string.a11y_action_enable))
+                    }
+                }
+            }
+
+            // 侧载受限提示：仅在确实检测到受限且尚未授权时展示
+            if (state.restrictedBySideload && !state.serviceRunning) {
+                Spacer(Modifier.height(12.dp))
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = stringResource(R.string.a11y_hint_restricted_title),
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = stringResource(R.string.a11y_hint_restricted_message),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                    }
+                }
+            }
         }
     }
 }

@@ -31,6 +31,7 @@ object NoAdViewModelFactory {
         initializer {
             val container = applicationContainer()
             HomeViewModel(
+                application = application(),
                 targetAppRepository = container.targetAppRepository,
                 logRepository = container.logRepository,
                 settingsRepository = container.settingsRepository,
@@ -64,7 +65,12 @@ object NoAdViewModelFactory {
 }
 
 /**
+ * 从 [CreationExtras] 取出 Application。
+ */
+private fun CreationExtras.application(): NoAdApplication =
+    this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY] as NoAdApplication
+
+/**
  * 从 [CreationExtras] 取出 Application 并返回依赖容器。
  */
-private fun CreationExtras.applicationContainer() =
-    (this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY] as NoAdApplication).container
+private fun CreationExtras.applicationContainer() = application().container

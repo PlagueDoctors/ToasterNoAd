@@ -37,6 +37,10 @@ interface DomainRuleDao {
     @Query("SELECT COUNT(*) FROM domain_rule WHERE source = :source")
     suspend fun countBySource(source: String): Int
 
+    /** 内置规则里属于白名单的条数，用于校验误杀防护是否已随黑名单一同导入 */
+    @Query("SELECT COUNT(*) FROM domain_rule WHERE source = :source AND is_whitelist = 1")
+    suspend fun countWhitelistBySource(source: String): Int
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertAll(rules: List<DomainRuleEntity>): List<Long>
 

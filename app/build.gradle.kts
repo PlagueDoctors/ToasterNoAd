@@ -78,6 +78,8 @@ dependencies {
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+    // Android 运行时由框架提供 org.json；JVM 单测需要同 API 的独立实现
+    testImplementation(libs.json)
 
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

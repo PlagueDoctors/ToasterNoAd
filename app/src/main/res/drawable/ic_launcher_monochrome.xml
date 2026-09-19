@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    NoAd 主题化图标（Monochrome）图层。
+
+    ## 为什么不直接复用 ic_launcher_foreground
+
+    两者**内容完全一致**（同一条斜杠切断方框），但拆成两个文件是有意的：
+
+    Android 13+ 的主题化图标会取本图层的 alpha 形状，
+    用系统壁纸提取的单色重新着色。前景层里斜杠延伸到画布之外，
+    这在普通图标上是「被遮罩自然裁切」的效果；
+    但如果某个启动器对单色图层的裁切处理不同
+    （例如不裁切、直接缩放），超出画布的部分会被截断成生硬切口。
+
+    保持独立文件后，若某启动器表现异常，可以只调整本文件而不影响普通图标。
+
+    ## 一致性约束（必须遵守）
+
+    本文件的路径数据必须与 `ic_launcher_foreground.xml` **完全一致**。
+    修改其一时必须同步修改另一个，否则主题化图标与普通图标会出现形态差异。
+
+    两者刻意**不引入任何差异** —— 包括不做「单色模式下的专属优化」。
+    单色可读性已通过「图形只依赖 alpha、缺口靠背景透出」在设计层面保证，
+    额外的分支只会带来不一致风险。
+
+    几何参数来源：`tools/gen_icon_paths.py`
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M36.00,26.00 L72.00,26.00 A10,10 0 0 1 82.00,36.00 L82.00,72.00 A10,10 0 0 1 72.00,82.00 L36.00,82.00 A10,10 0 0 1 26.00,72.00 L26.00,36.00 A10,10 0 0 1 36.00,26.00 Z M36.00,33.00 L33.00,36.00 A3,3 0 0 0 36.00,33.00 L72.00,33.00 A3,3 0 0 0 75.00,36.00 L75.00,72.00 A3,3 0 0 0 72.00,75.00 L36.00,75.00 A3,3 0 0 0 33.00,72.00 L33.00,36.00 A3,3 0 0 0 36.00,33.00 Z" />
+
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M-4.47,107.53 L47.99,55.06 L52.94,60.01 L0.47,112.47 Z" />
+
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M55.06,47.99 L107.53,-4.47 L112.47,0.47 L60.01,52.94 Z" />
+</vector>

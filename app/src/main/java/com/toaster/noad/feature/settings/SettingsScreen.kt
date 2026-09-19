@@ -19,11 +19,14 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.toaster.noad.R
+import com.toaster.noad.core.model.AccessibilityState
 import com.toaster.noad.core.navigation.NoAdViewModelFactory
 import com.toaster.noad.ui.theme.NoAdTheme
 
@@ -89,6 +92,34 @@ fun SettingsRoute(
 
             item {
                 Column {
+                    SectionTitle("拦截策略")
+                    SettingsGroupCard {
+                        SettingToggleRow(
+                            title = stringResource(R.string.a11y_card_title),
+                            subtitle = accessibilitySubtitle(uiState.accessibility),
+                            checked = uiState.settings.accessibilityEnabled,
+                            onToggle = {
+                                viewModel.setAccessibilityEnabled(
+                                    !uiState.settings.accessibilityEnabled,
+                                )
+                            },
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                        SettingClickRow(
+                            title = "域名过滤（S2/S3）",
+                            subtitle = "阶段 C/D 接入",
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                        SettingClickRow(
+                            title = "应用级断网（S4）",
+                            subtitle = "阶段 F 接入，需 Shizuku",
+                        )
+                    }
+                }
+            }
+
+            item {
+                Column {
                     SectionTitle("规则")
                     SettingsGroupCard {
                         SettingClickRow(
@@ -144,9 +175,33 @@ fun SettingsRoute(
     }
 }
 
+/**
+ * 无障碍开关的副标题。
+ *
+ * ## 为什么要写成三段式文案
+ *
+ * 这里的开关只是「应用内开关」，真正的生效还依赖系统授权。
+ * 若只显示"开启/关闭"，用户打开开关后若没去系统设置授权，
+ * 会以为已经生效 —— 这是最容易造成误解的地方。
+ * 因此副标题必须说清当前卡在哪一环。
+ */
 @Composable
-private fun SectionTitle(text: String) {
-    Text(
+private fun accessibilitySubtitle(state: AccessibilityState): String = when {
+    state.isEffectivelyActive ->
+        stringResource(R.string.a11y_status_running)
+
+    state.serviceRunning ->
+        "服务已授权，但应用内开关未开启"
+
+    state.appSwitchEnabled ->
+        "需要在系统设置中授权无障碍服务"
+
+    else ->
+        "自动关闭开屏与弹窗广告"
+}
+
+@Composable
+private fun SectionTitle(text: String) {    Text(
         text = text,
         style = MaterialTheme.typography.labelLarge,
         color = MaterialTheme.colorScheme.primary,

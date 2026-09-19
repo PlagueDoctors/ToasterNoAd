@@ -1,6 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    NoAd 自适应图标（圆形遮罩）。
+
+    与 ic_launcher.xml 内容一致：自适应图标的「形状」由系统决定，
+    round 变体只是给需要圆形图标的启动器一个显式入口。
+    图形本身已按「最坏情况是圆形遮罩」设计 —— 方框 28..80 完全落在
+    圆形安全区（以 54,54 为心、半径 36 的圆）内。
+-->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background android:drawable="@drawable/ic_launcher_background" />
     <foreground android:drawable="@drawable/ic_launcher_foreground" />
-    <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
 </adaptive-icon>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    S1 无障碍服务配置。
+
+    字段说明与取舍见各属性注释。注意部分字段也会在
+    NoAdAccessibilityService.onServiceConnected() 中以代码方式覆盖 ——
+    因为部分厂商 ROM 会忽略此文件中的 flags 字段，
+    以代码设置为准能保证行为一致。
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/accessibility_service_description"
+    android:notificationTimeout="100"
+    android:settingsActivity="com.toaster.noad.MainActivity"
+    android:summary="@string/accessibility_service_summary" />

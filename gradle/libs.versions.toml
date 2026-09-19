@@ -15,6 +15,8 @@ ksp = "2.2.10-2.0.2"
 room = "2.8.5"
 datastore = "1.2.1"
 coroutines = "1.9.0"
+# org.json 在真实设备上由 Android 框架提供；JVM 单元测试需要显式依赖同 API 的实现
+json = "20240303"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -44,6 +46,8 @@ androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = 
 androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
 # ---- DataStore ----
 androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
+# ---- 测试用的 org.json 实现（仅 JVM 单测）----
+json = { group = "org.json", name = "json", version.ref = "json" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

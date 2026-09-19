@@ -30,6 +30,15 @@ class TargetAppRepository(
 
     fun observeAccessibilityEnabledCount(): Flow<Int> = dao.observeAccessibilityEnabledCount()
 
+    /**
+     * 观察已启用无障碍拦截的纳管应用（含完整字段）。
+     *
+     * 供 S1 内存规则缓存订阅。与 [observeAccessibilityEnabledCount] 的区别：
+     * 后者只返回数量用于统计展示，本方法返回实体用于构建匹配快照。
+     */
+    fun observeEnabledForAccessibility(): Flow<List<TargetApp>> =
+        dao.observeAccessibilityEnabled().map { list -> list.map(TargetAppEntity::toDomain) }
+
     fun observeTotalCount(): Flow<Int> = dao.observeTotalCount()
 
     suspend fun loadAll(): List<TargetApp> = dao.loadAll().map(TargetAppEntity::toDomain)
