@@ -1,0 +1,43 @@
+<resources>
+    <string name="app_name">NoAd</string>
+
+    <!-- 底部导航 -->
+    <string name="nav_home">首页</string>
+    <string name="nav_apps">应用管理</string>
+    <string name="nav_logs">拦截日志</string>
+    <string name="nav_settings">设置</string>
+
+    <!-- 首页 -->
+    <string name="home_title">NoAd</string>
+    <string name="home_today_blocked">今日已拦截</string>
+    <string name="home_blocked_unit">次广告</string>
+    <string name="home_compare_yesterday">较昨日 +%1$d%%</string>
+    <string name="home_protection_status_on">保护已开启</string>
+    <string name="home_protection_status_off">保护未开启</string>
+    <string name="home_protected_apps">受保护应用</string>
+    <string name="home_protected_count">%1$d / %2$d 已启用</string>
+    <string name="home_action_enable">立即拦截</string>
+    <string name="home_action_view_logs">查看日志</string>
+
+    <!-- 应用管理 -->
+    <string name="apps_title">应用管理</string>
+    <string name="apps_search_hint">搜索应用</string>
+    <string name="apps_enabled">已启用</string>
+    <string name="apps_disabled">未启用</string>
+    <string name="apps_empty">未发现任何应用</string>
+
+    <!-- 拦截日志 -->
+    <string name="logs_title">拦截日志</string>
+    <string name="logs_empty">暂无拦截记录</string>
+    <string name="logs_today">今天</string>
+    <string name="logs_yesterday">昨天</string>
+
+    <!-- 设置 -->
+    <string name="settings_title">设置</string>
+    <string name="settings_group_general">通用</string>
+    <string name="settings_autostart">开机自启动</string>
+    <string name="settings_notification">拦截通知</string>
+    <string name="settings_group_advanced">高级</string>
+    <string name="settings_whitelist">白名单</string>
+    <string name="settings_about">关于 NoAd</string>
+</resources>
