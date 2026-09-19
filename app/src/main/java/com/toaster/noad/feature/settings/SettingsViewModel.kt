@@ -1,33 +1,86 @@
 package com.toaster.noad.feature.settings
 
 import androidx.lifecycle.ViewModel
-import kotlinx.coroutines.flow.MutableStateFlow
+import androidx.lifecycle.viewModelScope
+import com.toaster.noad.core.data.repository.DomainRuleRepository
+import com.toaster.noad.core.data.repository.RuleRepository
+import com.toaster.noad.core.data.settings.AppSettings
+import com.toaster.noad.core.data.settings.SettingsRepository
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
+/**
+ * 设置页 UI 状态。
+ */
 data class SettingsUiState(
-    val autostart: Boolean = false,
-    val notification: Boolean = true,
-    val darkTheme: Boolean = true,
-)
+    val settings: AppSettings = AppSettings(),
+    /** S1 无障碍规则启用条数 */
+    val skipRuleCount: Int = 0,
+    /** 域名规则总数 */
+    val domainRuleCount: Int = 0,
+    /** 域名白名单条数 */
+    val domainWhitelistCount: Int = 0,
+    val isLoading: Boolean = true,
+) {
+    /** 域名黑名单条数（总数减去白名单） */
+    val domainBlacklistCount: Int
+        get() = (domainRuleCount - domainWhitelistCount).coerceAtLeast(0)
+}
 
-class SettingsViewModel : ViewModel() {
-    private val _uiState = MutableStateFlow(SettingsUiState())
-    val uiState: StateFlow<SettingsUiState> = _uiState.asStateFlow()
+/**
+ * 设置 ViewModel。
+ *
+ * ## 与旧实现的区别
+ *
+ * 旧实现 `init` 里直接把状态覆盖为固定值（`autostart = true`），
+ * 这会让用户上次的选择在每次进入设置页时被丢弃。
+ * 现在全部读写 DataStore：**持久化、不回退**。
+ */
+class SettingsViewModel(
+    private val settingsRepository: SettingsRepository,
+    domainRuleRepository: DomainRuleRepository,
+    ruleRepository: RuleRepository,
+) : ViewModel() {
 
-    init {
-        _uiState.value = SettingsUiState(autostart = true, notification = true, darkTheme = true)
+    val uiState: StateFlow<SettingsUiState> = combine(
+        settingsRepository.settings,
+        ruleRepository.observeEnabledCount(),
+        domainRuleRepository.observeTotalCount(),
+        domainRuleRepository.observeWhitelistCount(),
+    ) { settings, skipCount, domainCount, whitelistCount ->
+        SettingsUiState(
+            settings = settings,
+            skipRuleCount = skipCount,
+            domainRuleCount = domainCount,
+            domainWhitelistCount = whitelistCount,
+            isLoading = false,
+        )
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+        initialValue = SettingsUiState(),
+    )
+
+    fun setAutostart(enabled: Boolean) {
+        viewModelScope.launch { settingsRepository.setAutostart(enabled) }
     }
 
-    fun toggleAutostart() {
-        _uiState.value = _uiState.value.copy(autostart = !_uiState.value.autostart)
+    fun setShowNotification(enabled: Boolean) {
+        viewModelScope.launch { settingsRepository.setShowNotification(enabled) }
     }
 
-    fun toggleNotification() {
-        _uiState.value = _uiState.value.copy(notification = !_uiState.value.notification)
+    fun setDarkTheme(enabled: Boolean) {
+        viewModelScope.launch { settingsRepository.setDarkTheme(enabled) }
     }
 
-    fun toggleDarkTheme() {
-        _uiState.value = _uiState.value.copy(darkTheme = !_uiState.value.darkTheme)
+    fun setShizukuEnhancementsEnabled(enabled: Boolean) {
+        viewModelScope.launch { settingsRepository.setShizukuEnhancementsEnabled(enabled) }
+    }
+
+    private companion object {
+        const val STOP_TIMEOUT_MS = 5_000L
     }
 }

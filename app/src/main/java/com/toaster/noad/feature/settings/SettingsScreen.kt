@@ -2,6 +2,7 @@ package com.toaster.noad.feature.settings
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -23,14 +24,22 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.toaster.noad.core.navigation.NoAdViewModelFactory
 import com.toaster.noad.ui.theme.NoAdTheme
 
+/**
+ * 设置页。
+ *
+ * 全部开关读写 DataStore，持久化生效。
+ * 规则数量等只读信息从 Repository 实时读取，作为设置的「效果反馈」。
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsRoute(
-    viewModel: SettingsViewModel = viewModel(),
+    viewModel: SettingsViewModel = viewModel(factory = NoAdViewModelFactory.Factory),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val settings = uiState.settings
 
     androidx.compose.material3.Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -40,39 +49,92 @@ fun SettingsRoute(
     ) { innerPadding ->
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = innerPadding,
+            contentPadding = PaddingValues(
+                start = 20.dp,
+                end = 20.dp,
+                top = innerPadding.calculateTopPadding(),
+                bottom = innerPadding.calculateBottomPadding() + 20.dp,
+            ),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             item {
-                Column(modifier = Modifier.padding(horizontal = 20.dp)) {
+                Column {
                     SectionTitle("通用")
                     SettingsGroupCard {
                         SettingToggleRow(
                             title = "开机自启动",
-                            checked = uiState.autostart,
-                            onToggle = viewModel::toggleAutostart,
+                            subtitle = "设备重启后自动恢复拦截",
+                            checked = settings.autostart,
+                            onToggle = { viewModel.setAutostart(!settings.autostart) },
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                         SettingToggleRow(
                             title = "拦截通知",
-                            checked = uiState.notification,
-                            onToggle = viewModel::toggleNotification,
+                            subtitle = "拦截时发送通知提醒",
+                            checked = settings.showNotification,
+                            onToggle = {
+                                viewModel.setShowNotification(!settings.showNotification)
+                            },
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                        SettingToggleRow(
+                            title = "深色主题",
+                            subtitle = "当前主题偏好",
+                            checked = settings.darkTheme,
+                            onToggle = { viewModel.setDarkTheme(!settings.darkTheme) },
                         )
                     }
                 }
             }
 
             item {
-                Column(modifier = Modifier.padding(horizontal = 20.dp)) {
-                    SectionTitle("高级")
+                Column {
+                    SectionTitle("规则")
                     SettingsGroupCard {
-                        SettingToggleRow(
-                            title = "深色主题",
-                            checked = uiState.darkTheme,
-                            onToggle = viewModel::toggleDarkTheme,
+                        SettingClickRow(
+                            title = "无障碍跳过规则",
+                            subtitle = "${uiState.skipRuleCount} 条已启用",
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-                        SettingClickRow(title = "白名单", subtitle = "已添加 0 个应用")
+                        SettingClickRow(
+                            title = "域名黑名单",
+                            subtitle = "${uiState.domainBlacklistCount} 条",
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                        SettingClickRow(
+                            title = "域名白名单",
+                            subtitle = "${uiState.domainWhitelistCount} 条（优先于黑名单）",
+                        )
+                    }
+                }
+            }
+
+            item {
+                Column {
+                    SectionTitle("增强能力")
+                    SettingsGroupCard {
+                        SettingToggleRow(
+                            title = "Shizuku 增强",
+                            subtitle = "启用应用级断网等特权能力（需安装 Shizuku）",
+                            checked = settings.shizukuEnhancementsEnabled,
+                            onToggle = {
+                                viewModel.setShizukuEnhancementsEnabled(
+                                    !settings.shizukuEnhancementsEnabled,
+                                )
+                            },
+                        )
+                    }
+                }
+            }
+
+            item {
+                Column {
+                    SectionTitle("关于")
+                    SettingsGroupCard {
+                        SettingClickRow(
+                            title = "日志保留",
+                            subtitle = "${settings.logRetentionDays} 天，上限 ${settings.logCapacity} 条",
+                        )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                         SettingClickRow(title = "关于 NoAd", subtitle = "v1.0")
                     }
@@ -107,11 +169,13 @@ private fun SettingsGroupCard(content: @Composable () -> Unit) {
 @Composable
 private fun SettingToggleRow(
     title: String,
+    subtitle: String? = null,
     checked: Boolean,
     onToggle: () -> Unit,
 ) {
     ListItem(
         headlineContent = { Text(title) },
+        supportingContent = subtitle?.let { text -> { Text(text) } },
         trailingContent = { Switch(checked = checked, onCheckedChange = { onToggle() }) },
     )
 }

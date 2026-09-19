@@ -602,6 +602,18 @@ domain == suffix || domain.endsWith(".$suffix")
 3. Repository 层全部实现
 4. `InstalledAppDataSource`
 
+> **✅ 阶段 A 已完成**（2026-09-19）。实际落地内容与本节的差异记录如下：
+>
+> | 项 | 计划 | 实际 |
+> |---|---|---|
+> | 新增依赖 | Room + DataStore | 另需 **KSP**（Room 注解处理），版本 `2.2.10-2.0.2` |
+> | 依赖注入 | 未说明 | 采用**手写 `AppContainer`**，未引入 DI 框架 |
+> | 构建调整 | 未说明 | 需 `android.disallowKotlinSourceSets=false`（AGP 9.x 限制） |
+> | 额外产出 | 未说明 | `DomainRuleEngine`（域名匹配）+ 15 个单元测试；新增「网络过滤」页 |
+> | 新增策略枚举 | OFF / DNS_ONLY / FULL_TRAFFIC | 扩展为 + `APP_FIREWALL` / `HYBRID`（S4） |
+>
+> 验证：`assembleDebug` 与 `testDebugUnitTest` 均通过（16 tests, 0 failures）。
+
 ### 阶段 B：S1 无障碍（独立，优先验证）
 5. `NoAdAccessibilityService` + `EventProcessor`
 6. `UiMatcher` + `ClickExecutor`（含降级点击）

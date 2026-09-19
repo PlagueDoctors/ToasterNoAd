@@ -5,20 +5,26 @@ import androidx.compose.material.icons.outlined.Apps
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Insights
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Insights
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.ui.graphics.vector.ImageVector
 
 /**
- * 顶层导航目的地
+ * 顶层导航目的地。
+ *
+ * @param showInBottomBar 是否出现在底部导航栏。
+ *   网络过滤页从首页进入而非放入底栏，避免底栏项过多（Material 建议 ≤ 5）。
  */
 enum class NoAdDestination(
     val route: String,
     val label: String,
     val outlinedIcon: ImageVector,
     val selectedIcon: ImageVector,
+    val showInBottomBar: Boolean = true,
 ) {
     Home(
         route = "home",
@@ -28,13 +34,20 @@ enum class NoAdDestination(
     ),
     Apps(
         route = "apps",
-        label = "应用管理",
+        label = "应用",
         outlinedIcon = Icons.Outlined.Apps,
         selectedIcon = Icons.Rounded.Apps,
     ),
+    Network(
+        route = "network",
+        label = "网络过滤",
+        outlinedIcon = Icons.Outlined.Shield,
+        selectedIcon = Icons.Rounded.Shield,
+        showInBottomBar = false,
+    ),
     Logs(
         route = "logs",
-        label = "拦截日志",
+        label = "日志",
         outlinedIcon = Icons.Outlined.Insights,
         selectedIcon = Icons.Rounded.Insights,
     ),
@@ -47,5 +60,8 @@ enum class NoAdDestination(
 
     companion object {
         val Start = Home
+
+        /** 底部导航栏使用的目的地 */
+        val bottomBarEntries: List<NoAdDestination> = entries.filter { it.showInBottomBar }
     }
 }

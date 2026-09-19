@@ -20,10 +20,14 @@ import androidx.navigation.compose.rememberNavController
 import com.toaster.noad.feature.apps.AppsRoute
 import com.toaster.noad.feature.home.HomeRoute
 import com.toaster.noad.feature.logs.LogsRoute
+import com.toaster.noad.feature.network.NetworkRoute
 import com.toaster.noad.feature.settings.SettingsRoute
 
 /**
- * 顶层应用容器：Scaffold + 底部导航 + NavHost
+ * 顶层应用容器：Scaffold + 底部导航 + NavHost。
+ *
+ * 底部导航栏仅在底栏目的地之间切换；[NoAdDestination.Network] 等
+ * 非底栏页面仍通过 NavHost 导航，此时底栏保持可见但无选中项。
  */
 @Composable
 fun NoAdApp() {
@@ -53,8 +57,27 @@ fun NoAdApp() {
             startDestination = NoAdDestination.Start.route,
             modifier = Modifier.fillMaxSize().padding(innerPadding),
         ) {
-            composable(NoAdDestination.Home.route) { HomeRoute() }
+            composable(NoAdDestination.Home.route) {
+                HomeRoute(
+                    onNavigateToLogs = {
+                        navController.navigate(NoAdDestination.Logs.route) {
+                            launchSingleTop = true
+                        }
+                    },
+                    onNavigateToApps = {
+                        navController.navigate(NoAdDestination.Apps.route) {
+                            launchSingleTop = true
+                        }
+                    },
+                    onNavigateToNetwork = {
+                        navController.navigate(NoAdDestination.Network.route) {
+                            launchSingleTop = true
+                        }
+                    },
+                )
+            }
             composable(NoAdDestination.Apps.route) { AppsRoute() }
+            composable(NoAdDestination.Network.route) { NetworkRoute() }
             composable(NoAdDestination.Logs.route) { LogsRoute() }
             composable(NoAdDestination.Settings.route) { SettingsRoute() }
         }
@@ -67,13 +90,15 @@ private fun NoAdBottomBar(
     onNavigate: (NoAdDestination) -> Unit,
 ) {
     NavigationBar {
-        NoAdDestination.entries.forEach { destination ->
-            val selected = currentDestination?.hierarchy?.any { it.route == destination.route } == true
+        NoAdDestination.bottomBarEntries.forEach { destination ->
+            val selected = currentDestination?.hierarchy
+                ?.any { it.route == destination.route } == true
             NavigationBarItem(
                 selected = selected,
                 onClick = { onNavigate(destination) },
                 icon = {
-                    val icon: ImageVector = if (selected) destination.selectedIcon else destination.outlinedIcon
+                    val icon: ImageVector =
+                        if (selected) destination.selectedIcon else destination.outlinedIcon
                     Icon(icon, contentDescription = destination.label)
                 },
                 label = { Text(destination.label) },
