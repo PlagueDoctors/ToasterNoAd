@@ -792,6 +792,180 @@ R11 曾向同一文件在同一消息批次发多个 Edit，结果**随机互相
 - 🔴 `--rerun-tasks` 与配置缓存不兼容（秒退，告警校验无效）。强制重编译姿势：
   `find app/src/main/java -name "*.kt" -exec touch {} +` 后 compile + `grep "^w: "`
 
+### R13：adb 高级授权（无 Shizuku 恢复通道）的契约
+
+- **恢复只有一套决策，两个 IO 层**：`AccessibilityRestoreOps.restore(exec)`
+  是唯一序列权威（已被 31 测试锁定）；shell 传 `shell::exec`，
+  ContentResolver 传 `SecureSettingsAccessibilityRestorer` 的命令解释器。
+  新增第三条通道时同样只写解释器，**绝不重写序列**
+- **解释器的两条语义对齐**（错一条就会出现「首次恢复永远失败」或
+  「权限被撤还在写」）：
+  1. `getString` 返回 null（键不存在）→ 必须映射为 `"null"` 字面量，
+     与 shell 的 `settings get` 输出形态一致，让 `parseEntries` 容忍；
+  2. `SecurityException`（WRITE_SECURE_SETTINGS 被撤）→ 传播到 restore
+     统一捕获为 Failed，**一个字节都不写**
+- **可测性模式同 R12**：主构造收读写注入函数（`(String) -> String?` /
+  `(String, String) -> Boolean`），ContentResolver 走次构造 ——
+  测试用内存 map 假体，不必上 Robolectric
+- **put 返回值刻意不检查**：与 shell 通道一致，生效与否由回读验证判定；
+  两处各检查一半反而造成「成功判定有两套真相」
+- **通道优先级在门面**：WRITE_SECURE_SETTINGS 在位 → 优先于 Shizuku
+  （权限判定 `hasSecureWritePermission` 注入为函数，JVM 可测）；
+  UI 文案必须跟随实际通道 —— 高级授权在位时按钮文案**不得**再带
+  「用 Shizuku」字样（不共名撒谎原则的延伸：不谎报通道）
+- **install-time 权限不做常驻观察**：运行期几乎不变（撤销需电脑），
+  刷新点与既有授权核对同源（refreshAccessibilityState 顺带）即可
+- adb 授权语义（对外说明口径）：一次授权终身有效，重启/清数据不失效，
+  仅卸载重装失效；直接写设置值不经过设置页 UI 的「受限设置」检查
+
+### R14：无障碍授权自动恢复的契约
+
+- **能力边界先说死**：force-stop 后进程死，JobScheduler/广播/闹钟全被
+  系统清除，后台唤醒物理不可行。自动恢复的极限 = **打开应用即自检恢复**，
+  对外说明不得许诺「后台全自动」
+- **触发时机的意图锚是「用户打开应用」**，不是 Watchdog：用户在系统
+  设置里手动关授权时不会打开本应用，这个锚天然成立、零误对抗。
+  不要用启发式去猜「是 ROM 清的还是用户关的」——猜必错
+- **应用内 S1 开关是第二道意图锚**：开关关着绝不动系统授权
+- **自动路径绝不回退 Shizuku**（`restoreViaSecureChannel`）：adb 授权
+  本身是「接受无感恢复」的表达；Shizuku 依赖其进程存活且静默调
+  shell 非预期。未授权用户自动路径短路 = 零回归
+- **节流是防拉锯的命门**（`AutoRestorePolicy`：30s 间隔 + 每进程 10 次，
+  手动不受限）——没有它，事件驱动恢复就会退化成 R8 否决的周期写；
+  **状态刻意不持久化**：进程重启清零 = 重开可立即再试，正是期望行为，
+  持久化旧账反而让用户白等
+- **记账顺序**：通道检查（不消耗记账）→ 策略判定 → recordAttempt →
+  执行。通道缺席被短路不算尝试（没写东西就不是拉锯一方）；
+  记账必须在恢复动作之前（失败也算，防异常路径绕过节流）
+- **静默语义**：仅 RESTORED 才 toast；ALREADY_PRESENT 是重绑时序差，
+  提示是噪音；失败静默（卡片 + 手动按钮兜底）。恢复成功后**不嵌套
+  refresh**——系统重绑有时序差，立刻核对大概率读到旧值
+- **自测教训**：节流测试里 maxAttempts 与间隔判定会互相混淆
+  （max=1 时 recordAttempt 一次即触上限，间隔分支根本没被测到）；
+  禁止写 `attemptsOf` 式假断言占位——用可区分的行为差异锁语义
+
+### 阶段 C：网络层骨架的契约
+
+- **让位仲裁先于一切 VPN 动作**（`VpnArbitrator`）：Android 同一时刻
+  只允许一个 VpnService；`onRevoke` 后**绝不自动 establish**——
+  自动重连 = 与其他 VPN 无限抢占循环。这与无障碍授权恢复（R14）性质
+  不同：接口争抢场景「让位即让位」，恢复只能用户显式触发
+- **决策矩阵注入可测**：`isOtherVpnActive` / `canControlPerAppNetwork`
+  注入为函数；S4 能力未接线前**恒 false**（保守不虚报降级能力）；
+  `VpnStartDecision.mode` 是实际将采用的模式（降级时会改写），调用方
+  不得用原始请求模式
+- **VPN 让位 ≠ 无障碍授权恢复**：后者的自动化锚是「用户打开应用」
+  （无对抗风险）；VPN 让位若自动化会造成抢占循环——两个「自动恢复」
+  的语义边界不要混淆
+- **DnsPacketParser 只管 DNS payload 层**（不含 IP/UDP 头，校验和属
+  包循环）；拦截=本地构造 NXDOMAIN、上游故障=SERVFAIL，**不可混用**
+  （方案 §4.3④）；构造=改写原查询字节（置 QR/写 RCODE/计数清零/
+  长度不变），不追加 answer
+- **解析器防御性拒绝**：过短 / QR=1 / opcode≠0 / QDCOUNT≠1 / QNAME
+  压缩指针 / 截断——「宁拒不猜」，question 区出现指针就是畸形
+- **S2 铁律用纯函数锁死**（`VpnTunConfig`）：只
+  `addRoute("10.0.0.1", 32)`，绝不 `0.0.0.0/0`——该约束从注释升级为
+  可执行断言；HYBRID 的 VPN 部分就是 S2；OFF/APP_FIREWALL 传入即抛错
+- **骨架服务必须零启动入口**：`NoAdVpnService` 的包处理循环属阶段 D，
+  接入前系统 DNS 会被指向无人应答的虚拟地址（全设备解析超时）——
+  骨架期**没有任何 startService 调用**是刻意的，勿「顺手」接线
+- **establish 前读上游 DNS**（§4.3①）：establish 后系统 DNS 指向
+  虚拟地址，再读到的就是自己——递归死锁
+
+### 阶段 D：S2 包循环的契约
+
+- **决策与 IO 与字节翻译三层分离**：`Ip4UdpPacket`（字节）/`DnsInterceptor`
+  （决策，engine 注入）/`DnsForwarder`（IO，protect 注入）全 JVM 可测；
+  Service 只做生命周期+线程+TUN 读写，不承载可测逻辑
+- **响应包复用原查询字节**：交换 IP/端口、替换 payload、改长度、重算
+  IP 校验和 —— 比从零构造少一大类边界；**UDP 校验和置 0 合法**
+  （RFC 768 对 IPv4），重算它纯属浪费；IP 头校验和必须重算（必检字段）
+- **校验和自测陷阱**：反码校验和的验证性质是「全头求和折叠 = 0xFFFF」，
+  不是 0 —— 断言写 0 必失败（取反后才是 0）
+- **Forward 透传原查询字节**：上游要靠原 ID/QNAME 应答，任何改写都会
+  让客户端匹配不上响应
+- **protect 失败/异常一律 null 绝不抛出**：包循环统一回退 SERVFAIL；
+  protect 必须发生在第一个包发出之前
+- **包循环线程退出靠关 TUN**：阻塞 read 在 onDestroy 关闭描述符时抛
+  IO 异常自然退出；不 stop/interrupt 线程（与关闭时序竞态）
+- **半启动比拒绝更危险**：FULL_TRAFFIC 在其循环（阶段 E）接线前必须
+  拒绝 establish —— 半启动=全设备 DNS 指向无人应答的虚拟地址
+- **mode 落盘时机即 UI 真相**：只在启动动作确实发出后写 DataStore；
+  让位/用户取消授权时不落盘；`yielded` 直接订阅 DataStore（服务
+  onRevoke 的写入要能即时回流 UI，内存副本=双真相）
+- **可测性注入清单**：`dnsPort` 注入使 JVM localhost 回环闭环测试可行
+  （生产恒 53）；回显服务 + 临时端口是 UDP 转发器的标准测法；
+  禁止写绕过被测对象的 forwardVia 式辅助（那是测 JDK 不是测代码）
+- **🔴 实机联调双坑（1.2.5）**：① 应用此前不联网时 Manifest 会漏
+  `INTERNET` 权限——缺它 `socket()` 直接 `EPERM`，转发器第一个
+  DatagramSocket 就死；引入任何联网能力先查权限。② Toast 只能在带
+  Looper 的线程弹——VM 的 IO 协程里调 `Toast.makeText(...).show()`
+  是 FATAL 崩溃并杀掉整个进程（连带 VPN 服务死亡）；统一
+  `Handler(mainLooper).post`。这两个问题单测永远测不出来
+  （权限与 Looper 是运行时语义），只能实机 logcat 抓
+- **取证优于猜测**：设备连 USB 时直接 `adb logcat -d -s <TAG>` +
+  `adb shell ping <虚拟IP>` + `ip rule/route show table all`，
+  三条命令即可区分「路由劫持/权限拒绝/线程崩溃」——
+  本地应答 ttl=64 = local 表劫持；EPERM = 缺权限；
+  FATAL EXCEPTION = 未捕获运行时异常
+
+### S1 事件流水线的性能契约（1.3-s1perf）
+
+- **主线程零 IPC 铁律**：`onAccessibilityEvent` 只允许做内存查表
+  （包名/纳管/规则）、事件类型判断、纯字符串预筛；**任何节点树遍历
+  都禁止出现在主线程**。单次扫描每节点 12 次字段 IPC，数百节点即
+  数百毫秒 —— 事件排队后的用户感知就是「启动后等两秒才跳过广告」
+- **合并的等价性论证（必须记住，别当降级）**：扫描对象是
+  **当前界面快照**（rootInActiveWindow）而非事件对象，因此连续 N 个
+  事件只处理最新一个，其扫描包含前 N-1 个能看到的一切 ——
+  合并是等价变换，不丢可观测信息，也不违反「只放宽不收紧」
+- **合并实现**：`LatestRequestQueue`（原子槽位覆盖）+ `workerActive`
+  单消费者 drain 循环 + **收尾重查**（poll 取空与置位清零之间到达的
+  请求必须兜住，否则偶发丢请求）
+- **非线程安全件绑定单消费者**：`AntiMisclickGate` 是普通 HashMap，
+  只允许消费者线程访问；`onWindowChanged()`（主线程）**只置原子标记**，
+  reset 由消费者执行。窗口重置标记必须用 **OR 累积**，不能随请求携带
+  —— 合并会覆盖请求，但任何一次窗口切换都必须重置（否则新界面广告
+  被上一个界面的冷却挡住，历史 bug）
+- **中间态要诚实**：投递后台后返回 `Queued`（不是 ClickScheduled）；
+  诊断里中间态**不递增 totalEvents**（终态会再记一次，否则双计数）
+- **🔴 Android 方法在 JVM 单测会抛 "not mocked"**：`SystemClock`/`Log`
+  等若位于业务首行，异常会被 `runCatching` 吞掉，症状是「后台逻辑
+  从未执行」这种极难排查的假象。**时钟与日志一律注入为函数**
+  （`clock: () -> Long`、`log: (String) -> Unit`），项目既有惯例
+- **可测性拆分模式**：新增含 Android 依赖的处理链时，先拆出
+  「纯数据入口」（如 `submit(packageName, eventType, activityName,
+  candidates, ...)`）承载全部判定逻辑，Android 适配层只做字段提取。
+  EventProcessor 曾因 `AccessibilityEvent` 无法在 JVM 构造而**零测试**，
+  拆分后闸门顺序/线程契约/合并语义全部有单测
+
+### S4 增强能力的实现契约（1.4，F3–F7）
+
+- **统一模式**：`Ops`（命令序列 + 输出解析，纯逻辑可测）+
+  `Controller`（门面：就绪检查 → 下发 → **回读验证**）。命令序列只写在 Ops，
+  门面绝不重写序列（与 `AccessibilityRestoreOps` 同源）
+- 🔴 **命令一律用字符串参数**：`cmd appops` 用 `RUN_IN_BACKGROUND` 而非
+  opCode 数值（数值随版本漂移会静默改错权限）；`set-package-networking-enabled`
+  的**取反语义**（本应用语义是「阻断」→ 命令参数是「联网可用」）在 Ops 层集中承担
+- **回读验证不是可选项**：命令成功 ≠ 生效（部分 ROM 静默忽略）。
+  解析失败时宁可 `Unknown`，绝不猜——猜错会产生假成功或重复下发
+- **逐项能力探测**（`ShizukuCapabilityProbe`）：某设备缺 Chain-3 只该让
+  「应用级断网」降级，其余能力不受影响；探测**只发只读命令**
+  （`am force-stop` 有副作用 → 改用 `am get-current-user` 探测）
+- **破坏性操作内建冷却**（F7 强停 10s/包）；**校验先于写入**
+  （Private DNS 主机名必须先拒绝 `https://.../dns-query` 形态，
+  否则系统进入严格模式却无法解析 = 整机断网）
+- **安全边界代码化**：系统应用禁止停用由 `PackageOps.isOperationAllowed`
+  强制，不依赖 UI 约束
+- **实机取证格式**（NX789J / Android 15）：
+  `get-package-networking-enabled <pkg>` → `<pkg>:allow`（另有裸 `true/false` 形态）；
+  `cmd appops get` → `No operations.` / `<OP>: ignore`；
+  `settings get global private_dns_mode` → `null`（未设置）；
+  `dumpsys package` → `User 0: … enabled=0`（0/1 可用、2/3/4 已停用）
+  + `enabledComponents:` 段
+- **降级链路**（§6.9）：仲裁的 `canControlPerAppNetwork` 接真实能力探测
+  （StateFlow 缓存，供同步决策读）；让位 → 对 `appFirewallEnabled` 的应用断网
+
 ## 十四、已知待修正项（不要沿用其写法）
 
 以下是当前代码库里客观存在的"临时/占位/违规"实现，**新增代码不要模仿**，改动相关

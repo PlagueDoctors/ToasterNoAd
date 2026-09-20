@@ -1,44 +1,40 @@
 # NoAd 项目长期记忆
 
 ## 定位与栈
-NoAd —— Android 广告拦截（自动关开屏/弹窗广告），com.toaster.noad，单模块 app，Compose+M3。
-锁定栈（禁随意升级）：AGP 9.3.2 / Gradle 9.5.0 / Kotlin 2.2.10 / KSP 2.2.10-2.0.2 / Compose BOM 2026.02.01 / compileSdk=targetSdk 37 / minSdk 30 / Java 11 / Room 2.8.5 / DataStore 1.2.1 / coroutines 1.9.0。
+NoAd —— Android 广告拦截（自动关广告），com.toaster.noad，单模块 app，Compose+M3。
+栈：AGP 9.3.2/Gradle 9.5.0/Kotlin 2.2.10/KSP 2.2.10-2.0.2/Compose BOM 2026.02.01/compileSdk=targetSdk 37/minSdk 30/Java 11/Room 2.8.5/DataStore 1.2.1/coroutines 1.9.0。
+> 细节（构建注意项、时钟注入等待）以 skill `noad-dev-standards` §十三 与 plan 为准，
+> 本文件只留最易忘的硬约束。
 
-## 交付标准（用户定界，全程有效）
-唯一验收 = `./gradlew testDebugUnitTest` 全绿 + `compileDebugKotlin` 0 error 0 warning。
-禁止实机测试与 assembleDebug 交付（用户自测）。
+## 交付标准（用户定界）
+唯一验收 = 单测全绿 + compileDebugKotlin 0 error 0 warning。
+禁止实机测试与打包交付；实机验证一律由用户 Android Studio 自建（已两次违规，勿再犯）。
 
-## 构建/架构硬约束
-1. gradle.properties 必须留 `android.disallowKotlinSourceSets=false`（KSP 靠它注册生成目录）。
-2. schemaLocation 同放 defaultConfig 与顶层 ksp{}；禁 fallbackToDestructiveMigration，改表写显式 Migration。
-3. 序列化强制 1.8.1：resolutionStrategy.force + toml serialization=1.8.1 不可回退（防误导性 AbstractMethodError）。
-4. 构造参数资源注解写 @param:StringRes（KT-73255，0 warning 门禁）。
-5. combine 最多 5 个 Flow；Kotlin Set 无下标访问。
-6. 领域模型不带 Room 注解；枚举入库 String；Repository 只暴露 Flow、写 suspend；无 DI（AppContainer 全 lazy + ViewModelFactory）。
-7. 事件回调（主线程）禁查库：走 S1RuleCache/ProtectionFlags 内存镜像。
+## 最易忘的硬约束
+1. combine 最多 5 个 Flow；Set 无下标；Ksp 目录：`android.disallowKotlinSourceSets=false` 必须留。
+2. 改表写显式 Migration（禁 destructive）；序列化强制 1.8.1（防 AbstractMethodError）。
+3. 主线程热路径禁查库禁 IPC：走内存镜像；时钟/日志一律注入（Android 方法在 JVM 单测抛 not mocked）。
+4. 抽象：Ops（纯逻辑）= 唯一命令序列权威；Controller = 就绪检查+下发+回读验证。
+5. 🔴 DNS 虚拟地址绝不能=TUN 地址（内核 local 表劫持）；🔴 cmd appops 只用字符串 op 名。
 
 ## 四策略
-S1 无障碍点击（无 VPN）；S2 DNS；S3 全流量 VPN；S4 Shizuku 断网（不占 VPN）。S2⊥S3 互斥；S4 任意组合；见其他 VPN 主动停绝不重连。
-- S2：只 addRoute 10.0.0.1/32；establish 前读上游 DNS；socket 必须 protect()；NXDOMAIN/SERVFAIL 区分；后缀匹配 `domain==s||domain.endsWith(".$s")`；白名单优先。
-- S1 铁律：规则来自实证非常识；开屏文本 EXACT 必落空（用 PREFIX≤6 字）；通用规则同样受纳管约束（先判 managedPackages）；预筛只放宽不收紧（VIEW_ID/REGEX 整体放行）；点击投后台（ClickScheduled 不计总数）；NodeSnapshot 隔离、recycle 不能删、窗口切换 gate.reset()。
+S1 无障碍点击；S2 DNS；S3 全流量 VPN；S4 Shizuku 断网（不占 VPN）。S2⊥S3 互斥；S4 任意组合；见他 VPN 停绝不重连。
+- S2：只 addRoute DNS 虚拟地址；establish 前读上游 DNS（仅 IPv4）；socket 必须 protect()。
+- S1 铁律：EXACT 必落空（PREFIX≤6 字）；通用规则受纳管约束；预筛只放宽；点击投后台。
+- S3 入口仍关（TCP 转发需 tun2socks 级实现）；E 数据层（A 记录解析/IpDomainMap/TrafficFilter，无映射一律放行）已就绪。
 
-## skip_rule 链路（零件全绿≠链路可用）
-builtin_skip_rules.json → Loader → mergeBuiltin（幂等/只增不删/IGNORE）→ S1RuleCache → 四闸。source 存 persistedName 小写；CONTAINS 防护放规则层（≥4 字、禁诱导词）。
+## 恢复链（R8–R14）
+R8 三态（无保活靠自愈，Watchdog 同步启动+前台 ON_RESUME 缺一）。
+R12 一键清理=force-stop 撤销授权：读改写→回读验证。R13 adb WRITE_SECURE_SETTINGS 终身（卸载重装失），通道序 secure>Shizuku。
+R14 开应用自检静默恢复（30s/10 次节流；锚=开关开+用户打开）。
+Shizuku：getVersion()≤0 未就绪；ShellClient/Ops/Controller 勿 internal（容器持有）。
 
-## R8 授权模型（无保活，靠自愈）
-三态 isEffectivelyActive/isDisconnectedButAuthorized（勿扰）/isNotAuthorized；禁保活、禁隐藏断开；Watchdog 同步启动+前台 ON_RESUME 缺一不可（14+ RECEIVER_NOT_EXPORTED；不注册 SCREEN_OFF）；首因优先；时钟可注入。
+## 阶段 F（1.4-s4phase，已交付能力层）
+F1 能力探测逐项可失败→Holder；F3 Chain-3 断网（`<pkg>:allow` 回读）；F4 Private DNS（mode+specifier 成对、拒 URL）；
+F5 包/组件停用（拒系统应用）；F6 AppOps 字符串 op；F7 强停（10s/包冷却）；降级链路：让位→appFirewallEnabled 应用断网。
+**未接线**：F3–F7 的 UI 入口。
 
-## R9/R10 保活与隐身
-恢复链：粘性重启（false 必停，null=乐观恢复）→心跳（失败必重排、onDestroy 不取消、显式 Intent）→BOOT/更新广播（门控=keepAlive&&autostart）。FGS specialUse+低渠道；13+ 通知权限拒绝不阻断；force-stop 不可自启。R10：excludeFromRecents；通知动态=纯层 Content 类；无横幅=低渠道+同 ID；计数=intercept_log COUNT 单一源。
-
-## Shizuku（R11 F1/F2、R12 恢复授权，细节见 skill §十三）
-传输层 = UserService + 自有极简 AIDL(exec) + cmd appops 字符串名（newProcess 将被移除；框架 AIDL 事务码漂移；禁 op 数值）。getVersion()≤0 未就绪（无 getServerVersion）。成功判定=get 回读验证（包级→--uid）；门面 SideloadRestrictionController（feature 零引用）；成功调 markRestrictedSettingCleared()（进程内，重启归保守）；ShellClient/Fixer/Ops/Restorer 不能 internal（AppContainer 公开持有）。诚实边界：Ready 只带 canSetAppOps；失败回退手动引导。
-R12 恢复：一键清理按 force-stop 撤销授权（不可阻止）。read-merge-write：get→合并（已存在零改写含大小写）→put→回读验证；+accessibility_enabled=1。R8 禁止表只禁周期后台写（显式恢复不在此列）。门面 RecoveryController 平行于 SideloadRestrictionController。
-🔴 同一文件多个 Edit 不得进同一并行批次（随机覆盖静默丢失）；每文件每轮一个。
-
-## 定稿与环境
-- 域名规则 60 黑+6 白 builtin_domains.json，黑白必须同批导入。
-- 图标：只依赖 alpha；不用 strokeWidth；矢量与 gen_icon_pngs.py 同步；monochrome=foreground；webp 勿恢复。
-- 质量：307 tests / 18 类（R12 后），0 警告。
-- 环境：Bash 先 export PATH；网络代理可达 Maven Central；校验看 merged_manifest。
-- 文档：docs/CODING_STANDARDS.md（权威）；THREE_STRATEGY_PLAN.md（唯一方案，R11/R12 已录）；skill noad-dev-standards（§十三）。
+## 流程惯例
+🔴 同一文件多个 Edit 不得进同一并行批次；版本号随交付递增；实机取证优先于猜测（adb logcat -d / ip rule / 只读命令探测输出格式）。
+质量基线：479 tests/38 类，0 警告。
+命令行构建：登记 `installations.paths=AS 的 jbr`（daemon 需 JDK 25）+ 关 auto-download。

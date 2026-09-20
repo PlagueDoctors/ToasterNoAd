@@ -1,7 +1,9 @@
 package com.toaster.noad
 
+import android.Manifest
 import android.app.Application
 import android.content.Context
+import android.content.pm.PackageManager
 import com.toaster.noad.core.applist.InstalledAppDataSource
 import com.toaster.noad.core.data.repository.DomainRuleRepository
 import com.toaster.noad.core.data.repository.LogRepository
@@ -12,17 +14,33 @@ import com.toaster.noad.core.data.rules.BuiltinSkipRulesLoader
 import com.toaster.noad.core.data.settings.SettingsRepository
 import com.toaster.noad.core.database.NoAdDatabase
 import com.toaster.noad.core.database.entity.DomainRuleEntity
+import com.toaster.noad.core.service.AccessibilityAutoRestorer
 import com.toaster.noad.core.service.AccessibilityRecoveryController
 import com.toaster.noad.core.service.AccessibilityStateHolder
 import com.toaster.noad.core.service.AccessibilityWatchdog
+import com.toaster.noad.core.service.AppFirewallController
+import com.toaster.noad.core.service.AppOpsController
+import com.toaster.noad.core.service.AutoRestorePolicy
+import com.toaster.noad.core.service.PackageController
+import com.toaster.noad.core.service.PrivateDnsController
+import com.toaster.noad.core.service.ProcessController
 import com.toaster.noad.core.service.ProtectionFlags
+import com.toaster.noad.core.service.SecureSettingsAccessibilityRestorer
 import com.toaster.noad.core.service.SideloadRestrictionController
 import com.toaster.noad.core.service.keepalive.KeepAliveRuntime
 import com.toaster.noad.core.service.keepalive.KeepAliveService
+import com.toaster.noad.core.vpn.VpnArbitrator
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import java.net.NetworkInterface
+import java.util.Collections
 import com.toaster.noad.core.service.shizuku.AccessibilityAuthorizationRestorer
 import com.toaster.noad.core.service.shizuku.RestrictedSettingsFixer
 import com.toaster.noad.core.service.shizuku.ShizukuAvailabilityHolder
+import com.toaster.noad.core.service.shizuku.ShizukuCapabilityHolder
+import com.toaster.noad.core.service.shizuku.ShizukuCapabilityProbe
 import com.toaster.noad.core.service.shizuku.ShizukuShellClient
+import com.toaster.noad.core.service.shizuku.ShizukuState
 import com.toaster.noad.core.repository.S1RuleCache
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -123,19 +141,131 @@ class AppContainer(private val context: Context) {
     }
 
     /**
-     * 无障碍授权恢复门面（R12）。
+     * 无障碍授权恢复门面（R12，R13 升级双通道）。
      *
      * ROM「一键清理」按 force-stop 语义撤销无障碍授权后，
      * 用户点一下即可恢复授权记录（read-merge-write 保护他人条目），
-     * 不必再跑系统设置。与受限解除（F2）是两个关注点，各自独立成门面。
+     * 不必再跑系统设置。通道优先级：adb 高级授权（WRITE_SECURE_SETTINGS，
+     * 一次授权终身有效）> Shizuku（R12）> 手动引导。
+     * 与受限解除（F2）是两个关注点，各自独立成门面。
      */
     val accessibilityRecoveryController: AccessibilityRecoveryController by lazy {
         AccessibilityRecoveryController(
             context = context,
             shizukuHolder = shizukuAvailabilityHolder,
             restorer = AccessibilityAuthorizationRestorer(shell = shizukuShellClient),
+            secureSettingsRestorer = SecureSettingsAccessibilityRestorer(context.contentResolver),
+            hasSecureWritePermission = {
+                context.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) ==
+                    PackageManager.PERMISSION_GRANTED
+            },
         )
     }
+
+    /**
+     * 无障碍授权自动恢复器（R14）：启动/回前台自检时静默恢复丢失的授权。
+     *
+     * 只绑 WRITE_SECURE_SETTINGS 通道（不自动走 Shizuku，理由见其 KDoc），
+     * 节流策略为进程内实例 —— 进程重启即清零，重新打开应用可立即再试一次。
+     */
+    val accessibilityAutoRestorer: AccessibilityAutoRestorer by lazy {
+        AccessibilityAutoRestorer(
+            policy = AutoRestorePolicy(),
+            hasSecureWritePermission =
+                accessibilityRecoveryController::canRestoreWithoutShizuku,
+            secureRestore = accessibilityRecoveryController::restoreViaSecureChannel,
+        )
+    }
+
+    /**
+     * Shizuku 逐项能力探测发布者（F1；F3–F7 的统一能力闸门）。
+     *
+     * 逐项、运行时、可失败：某台设备缺 Chain-3 时只让「应用级断网」
+     * 降级，不影响 Private DNS / 包管理 / AppOps / 强停。
+     */
+    val shizukuCapabilityHolder: ShizukuCapabilityHolder by lazy {
+        ShizukuCapabilityHolder(
+            probe = ShizukuCapabilityProbe(
+                exec = shizukuShellClient::exec,
+                isReady = ::isShizukuReady,
+                selfPackageName = context.packageName,
+            ),
+            scope = applicationScope,
+        )
+    }
+
+    /** S4 应用级断网（F3，Chain-3） */
+    val appFirewallController: AppFirewallController by lazy {
+        AppFirewallController(
+            exec = shizukuShellClient::exec,
+            isReady = ::isShizukuReady,
+            selfPackageName = context.packageName,
+        )
+    }
+
+    /** Private DNS 改写（F4；不预判就绪 —— 通道不可用时其自身返回 ChannelUnavailable） */
+    val privateDnsController: PrivateDnsController by lazy {
+        PrivateDnsController(exec = shizukuShellClient::exec)
+    }
+
+    /** 应用 / 组件停用（F5；门面内部强制拒绝系统应用） */
+    val packageController: PackageController by lazy {
+        PackageController(exec = shizukuShellClient::exec, isReady = ::isShizukuReady)
+    }
+
+    /** AppOps 精细化控制（F6；全字符串操作名，绝无数值 opCode） */
+    val appOpsController: AppOpsController by lazy {
+        AppOpsController(exec = shizukuShellClient::exec, isReady = ::isShizukuReady)
+    }
+
+    /** 强制停止（F7；内建按包冷却，防破坏性重复触发） */
+    val processController: ProcessController by lazy {
+        ProcessController(exec = shizukuShellClient::exec, isReady = ::isShizukuReady)
+    }
+
+    /** Shizuku 是否已就绪（Ready = binder 存活 + 已授权 + 探测完成） */
+    private fun isShizukuReady(): Boolean =
+        shizukuAvailabilityHolder.state.value is ShizukuState.Ready
+
+    /**
+     * VPN 让位仲裁（阶段 C）：任何 VPN 动作前的唯一决策入口。
+     *
+     * `canControlPerAppNetwork` 接**真实能力**（Chain-3 探测结果）：
+     * 满足时「让位 → 降级为应用级断网」，否则让位即失效（方案 §6.9）。
+     */
+    val vpnArbitrator: VpnArbitrator by lazy {
+        VpnArbitrator(
+            isOtherVpnActive = { detectOtherVpnActive() },
+            canControlPerAppNetwork = {
+                shizukuCapabilityHolder.capabilities.value.canControlPerAppNetwork
+            },
+        )
+    }
+
+    /**
+     * 「检测到其他 VPN」的判定绝不能把自己算进去，否则 S2 运行期间
+     * 每次仲裁都会误判让位。运行事实由 [VpnStateHolder.running] 单一
+     * 持有（服务维护），此处只读 —— 系统 VPN 单实例，自己在跑时
+     * 其他 VPN 必然不存在，直接短路。
+     */
+    private fun detectOtherVpnActive(): Boolean {
+        if (com.toaster.noad.core.vpn.VpnStateHolder.running.value) return false
+        val cm = context.getSystemService(ConnectivityManager::class.java)
+            ?: return hasTunInterfaceFallback()
+        return runCatching {
+            cm.allNetworks.any { network ->
+                cm.getNetworkCapabilities(network)
+                    ?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+            }
+        }.getOrDefault(hasTunInterfaceFallback())
+    }
+
+    private fun hasTunInterfaceFallback(): Boolean = runCatching {
+        val interfaces = NetworkInterface.getNetworkInterfaces() ?: return@runCatching false
+        Collections.list(interfaces).any {
+            it.name.startsWith("tun") || it.name.startsWith("ppp")
+        }
+    }.getOrDefault(false)
 
     /**
      * S1 规则内存缓存（进程内单例）。

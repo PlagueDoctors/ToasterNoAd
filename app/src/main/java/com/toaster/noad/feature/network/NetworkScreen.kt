@@ -1,5 +1,7 @@
 package com.toaster.noad.feature.network
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -26,6 +28,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,6 +60,22 @@ fun NetworkRoute(
     viewModel: NetworkViewModel = viewModel(factory = NoAdViewModelFactory.Factory),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+
+    // 系统级 VPN 授权对话框（VpnService.prepare 返回的 Intent）。
+    // 授权结果回流 ViewModel：成功 → 启动服务；取消 → 让位横幅说明。
+    val vpnPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            viewModel.onVpnPermissionGranted()
+        } else {
+            viewModel.onVpnPermissionDenied()
+        }
+    }
+
+    LaunchedEffect(uiState.vpnPermissionIntent) {
+        uiState.vpnPermissionIntent?.let { intent -> vpnPermissionLauncher.launch(intent) }
+    }
 
     androidx.compose.material3.Scaffold(
         modifier = Modifier.fillMaxSize(),

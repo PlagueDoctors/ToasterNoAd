@@ -15,13 +15,16 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -30,6 +33,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -228,6 +232,8 @@ fun SettingsRoute(
                                 )
                             },
                         )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                        AdvancedGrantRow()
                     }
                 }
             }
@@ -287,6 +293,97 @@ private fun SectionTitle(text: String) {    Text(
         modifier = Modifier.padding(vertical = 8.dp),
     )
 }
+
+/**
+ * 高级授权入口行（R13：adb 授予 WRITE_SECURE_SETTINGS）。
+ *
+ * ## 为什么放在设置页而不是首页
+ *
+ * 授权动作（连电脑执行 adb 命令）一生只做一次，做完即终身有效；
+ * 它不是「每次打开应用都要看的引导」，塞在首页会长期挤占空间。
+ * 首页的恢复按钮由 [com.toaster.noad.feature.home.HomeViewModel]
+ * 的 `secureRestoreAvailable` 决定是否展示，与本行的状态同源
+ * （同一个权限），两处永远一致。
+ *
+ * 状态查询与刷新完全跟随 [BatteryExemptionRow] 的自治模式：
+ * 状态由系统掌管、应用只能读，用 ON_RESUME 感知「从电脑授权回来」。
+ */
+@Composable
+private fun AdvancedGrantRow() {
+    val context = LocalContext.current
+    var granted by remember { mutableStateOf(hasWriteSecureSettings(context)) }
+    var showDialog by remember { mutableStateOf(false) }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                granted = hasWriteSecureSettings(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    if (showDialog) {
+        AlertDialog(
+            onDismissRequest = { showDialog = false },
+            title = { Text(stringResource(R.string.advanced_grant_dialog_title)) },
+            text = {
+                Column {
+                    Text(
+                        text = stringResource(
+                            if (granted) {
+                                R.string.advanced_grant_dialog_status_granted
+                            } else {
+                                R.string.advanced_grant_dialog_status_missing
+                            },
+                        ),
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (granted) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.error
+                        },
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        // 包名在运行时注入，避免资源里硬编码应用自身包名
+                        text = stringResource(
+                            R.string.advanced_grant_dialog_body,
+                            context.packageName,
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showDialog = false }) {
+                    Text(stringResource(R.string.advanced_grant_dialog_close))
+                }
+            },
+        )
+    }
+
+    SettingClickRow(
+        title = stringResource(R.string.advanced_grant_row_title),
+        subtitle = stringResource(
+            if (granted) {
+                R.string.advanced_grant_row_granted
+            } else {
+                R.string.advanced_grant_row_missing
+            },
+        ),
+        onClick = { showDialog = true },
+    )
+}
+
+/** 查询本应用是否已被 adb 授予写系统设置权限。系统服务异常时按「未授予」处理。 */
+private fun hasWriteSecureSettings(context: Context): Boolean =
+    context.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) ==
+        PackageManager.PERMISSION_GRANTED
 
 /**
  * 电池优化豁免入口行。

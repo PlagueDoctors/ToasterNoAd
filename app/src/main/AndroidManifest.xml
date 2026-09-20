@@ -19,6 +19,13 @@
 
     <!-- 网络状态：用于检测其他 VPN 是否运行（让位仲裁） -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!--
+        S2/S3 的 DNS 转发需要真实联网：无此权限时 socket() 系统调用直接
+        返回 EPERM（实机取证：转发器首个 DatagramSocket 即失败）。
+        应用此前不发起任何对外连接，此权限仅用于「转发客户端自己的
+        DNS 查询」，不引入任何数据上报。
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <!-- 开机自启动（可选，由设置开关控制） -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -30,6 +37,21 @@
         后台前台服务启动豁免 —— 需要用户在系统弹窗中确认一次。
     -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!--
+        WRITE_SECURE_SETTINGS（R13「高级授权」通道）：
+        持有后可在**无需 Shizuku** 的情况下恢复被「一键清理」撤销的
+        无障碍授权（read-merge-write 保护他人条目，见
+        SecureSettingsAccessibilityRestorer）。该权限为
+        signature|privileged|development 级，普通安装无法获得，
+        必须由用户通过 adb 显式授予一次（设置页提供操作说明），
+        授权后重启不失效（卸载重装需重新授权）。
+        tools:ignore：Lint 对受保护权限的常规拦截 —— 本应用的
+        授权获取路径（adb 显式授予）本身就是系统设计内的正当用法。
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
 
     <application
         android:name=".NoAdApplication"
@@ -111,6 +133,22 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keep the ad-blocking accessibility service process alive so interception survives process death" />
+        </service>
+
+        <!--
+            阶段 C：S2/S3 共用的 VPN 骨架服务。
+
+            BIND_VPN_SERVICE 由系统持有并校验（用户经 VpnService.prepare 授权），
+            应用不声明 uses-permission。服务为骨架：启动决策链已实现，
+            包处理循环属阶段 D —— 在其接入前没有任何路径会启动本服务。
+        -->
+        <service
+            android:name=".core.service.NoAdVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
         </service>
 
         <!--

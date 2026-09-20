@@ -11,16 +11,19 @@ import com.toaster.noad.core.data.repository.TargetAppRepository
 import com.toaster.noad.core.data.settings.SettingsRepository
 import com.toaster.noad.core.model.AccessibilityState
 import com.toaster.noad.core.model.InterceptSource
+import com.toaster.noad.core.service.AccessibilityAutoRestorer
 import com.toaster.noad.core.service.AccessibilityRecoveryController
 import com.toaster.noad.core.service.AccessibilitySettingsLauncher
 import com.toaster.noad.core.service.AccessibilityStateHolder
 import com.toaster.noad.core.service.ProtectionFlags
 import com.toaster.noad.core.service.SideloadRestrictionController
+import com.toaster.noad.core.vpn.VpnStateHolder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -63,6 +66,17 @@ data class HomeUiState(
     val shizukuNeedsPermission: Boolean = false,
     /** F2 解除流程进行中：按钮禁用 + 文案切换，防止重复点击 */
     val fixingRestricted: Boolean = false,
+    /**
+     * 已具备 adb 高级授权（WRITE_SECURE_SETTINGS，R13）：
+     * 恢复按钮无需 Shizuku 也可展示，且文案不带「Shizuku」字样
+     * （实际走的是 ContentResolver 直写通道）。
+     */
+    val secureRestoreAvailable: Boolean = false,
+    /**
+     * S2 DNS 过滤是否真正生效 = 用户意图（模式选中且占 VPN）× 运行事实
+     * （VpnStateHolder，由 NoAdVpnService 发布）。二者缺一不可。
+     */
+    val dnsActive: Boolean = false,
 )
 
 /**
@@ -85,6 +99,7 @@ class HomeViewModel(
     private val settingsRepository: SettingsRepository,
     private val sideloadRestrictionController: SideloadRestrictionController,
     private val accessibilityRecoveryController: AccessibilityRecoveryController,
+    private val accessibilityAutoRestorer: AccessibilityAutoRestorer,
 ) : AndroidViewModel(application) {
 
     private val todayCount = logRepository.observeTodayCount()
@@ -99,6 +114,16 @@ class HomeViewModel(
 
     /** F2 解除流程防重入标志 */
     private val fixInFlight = MutableStateFlow(false)
+
+    /**
+     * adb 高级授权（WRITE_SECURE_SETTINGS）在位标志（R13）。
+     *
+     * 不是 Flow 派生而是手动刷新：该权限是 install-time 的，
+     * 运行期几乎不变（撤销需要电脑），不值得为它挂常驻观察；
+     * 刷新点与授权核对同源（[refreshAccessibilityState]，init +
+     * ON_RESUME），省一类刷新时机。
+     */
+    private val secureRestoreAvailable = MutableStateFlow(false)
 
     /**
      * 应用内数据（计数 + 排行），5 路以内。
@@ -124,12 +149,31 @@ class HomeViewModel(
         )
     }
 
+    /** 恢复相关 UI 状态的聚合（combine 5 路上限内腾位给 DNS 运行状态） */
+    private val restoreUi = combine(
+        fixInFlight,
+        secureRestoreAvailable,
+    ) { fixing, secureRestore -> RestoreUi(fixing, secureRestore) }
+
+    /**
+     * S2 是否真正生效 = **用户意图 × 运行事实**（plan §7.1 ProtectionState 语义）。
+     *
+     * 只看运行事实会有两个错显：模式已选「关闭」但运行标志尚未清零的
+     * 窗口内误显运行中；以及服务异常残留时永远「运行中」。意图关了
+     * 就必须显示关闭 —— 这是对用户唯一诚实的与逻辑。
+     */
+    private val dnsActive = combine(
+        settingsRepository.networkFilterMode,
+        VpnStateHolder.running,
+    ) { mode, running -> running && mode.occupiesVpn }
+
     val uiState: StateFlow<HomeUiState> = combine(
         appData,
         accessibilityState,
         shizukuSupport,
-        fixInFlight,
-    ) { data, a11y, support, fixing ->
+        restoreUi,
+        dnsActive,
+    ) { data, a11y, support, restore, dnsOn ->
         HomeUiState(
             todayBlocked = data.todayBlocked,
             protectionEnabled = data.protectionEnabled,
@@ -140,7 +184,9 @@ class HomeViewModel(
             accessibility = a11y,
             shizukuReady = support.ready,
             shizukuNeedsPermission = support.needsPermission,
-            fixingRestricted = fixing,
+            fixingRestricted = restore.fixing,
+            secureRestoreAvailable = restore.secureRestore,
+            dnsActive = dnsOn,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -155,6 +201,11 @@ class HomeViewModel(
         val protectedAppCount: Int,
         val totalAppCount: Int,
         val topApps: List<TopBlockedAppItem>,
+    )
+
+    private data class RestoreUi(
+        val fixing: Boolean,
+        val secureRestore: Boolean,
     )
 
     init {
@@ -186,6 +237,52 @@ class HomeViewModel(
             // 用 application 上下文：Settings.Secure 查询是跨进程调用，
             // 传 Activity 上下文可能因 Activity 销毁而持有无效引用
             AccessibilityStateHolder.refreshFromSystemSettings(getApplication())
+            // R13：顺带核对高级授权在位状态（同一刷新时机，不单设观察）
+            secureRestoreAvailable.value =
+                accessibilityRecoveryController.canRestoreWithoutShizuku()
+            // R14：自检后顺带尝试静默自动恢复（内部自带全部门槛与节流）
+            maybeAutoRestoreAuthorization()
+        }
+    }
+
+    /**
+     * 静默自动恢复无障碍授权（R14）。
+     *
+     * ## 触发条件（全部满足才动手）
+     *
+     * 1. **应用内 S1 开关开着**（[AppSettings.accessibilityEnabled]）——
+     *    这是用户意图锚：用户想用拦截，授权丢失几乎必然是 ROM 清理；
+     *    开关关着说明用户不想用，此时**绝不动系统授权**
+     *    （用户去系统设置手动关闭时不会打开本应用，这个锚天然成立）；
+     * 2. 授权确实丢失（`isNotAuthorized`：服务没跑且设置记录没了）——
+     *    `isDisconnectedButAuthorized`（仅解绑）不触发，系统会自行重连；
+     * 3. 高级授权通道在位且 [AccessibilityAutoRestorer] 内部节流允许；
+     * 4. 无其他特权操作进行中（复用 [fixInFlight] 防重入）。
+     *
+     * ## 静默语义
+     *
+     * 只有**确实恢复了一条丢失的授权**（RESTORED）才提示用户 ——
+     * ALREADY_PRESENT 只是服务重绑的时序差，弹提示是噪音；失败也
+     * 静默：首页卡片本就会显示「未授权」状态与手动按钮兜底。
+     * 手动按钮路径不受自动节流限制，两者互不干扰。
+     */
+    private suspend fun maybeAutoRestoreAuthorization() {
+        if (fixInFlight.value) return
+        val switchOn = runCatching {
+            settingsRepository.settings.first().accessibilityEnabled
+        }.getOrDefault(false)
+        if (!switchOn) return
+        if (!AccessibilityStateHolder.state.value.isNotAuthorized) return
+
+        when (accessibilityAutoRestorer.maybeRestore()) {
+            AccessibilityRecoveryController.RestoreOutcome.RESTORED -> {
+                toast(R.string.restore_toast_auto_success)
+                // 不在此处嵌套 refresh：写设置后系统重绑服务有延迟，
+                // 立刻核对大概率仍读到旧值；holder 的下一次
+                // ON_RESUME / Watchdog 刷新会纠正，服务重连本身
+                // 也会经 onServiceConnected 推送真实状态。
+            }
+            else -> Unit
         }
     }
 
@@ -248,15 +345,15 @@ class HomeViewModel(
     }
 
     /**
-     * 用 Shizuku 一键恢复无障碍授权（R12）。
+     * 一键恢复无障碍授权（R12 Shizuku 通道 + R13 adb 高级授权通道）。
      *
      * 背景：激进 ROM 的「一键清理 / 上划清除」按 force-stop 语义处理应用，
      * 系统随之撤销无障碍授权记录 —— 用户被迫去系统设置重新开启。
-     * 授权记录的恢复需要 shell 权限；Shizuku 就绪时，这里把
-     * 「read-merge-write + 回读验证」的恢复序列变成一次点击。
+     * 通道选择在门面内部：有 WRITE_SECURE_SETTINGS 走 ContentResolver
+     * 直写，否则回退 Shizuku；二者都是「read-merge-write + 回读验证」。
      *
      * 与 [resolveRestrictedSettings] 共用 [fixInFlight] 防重入：
-     * 两者都是 Shizuku 特权操作，不并发执行足以覆盖互斥需求，
+     * 两者都是特权操作，不并发执行足以覆盖互斥需求，
      * 也让按钮禁用逻辑保持单一状态源。
      */
     fun restoreAccessibilityAuthorization() {
@@ -293,7 +390,13 @@ class HomeViewModel(
     }
 
     private fun toast(resId: Int) {
-        Toast.makeText(getApplication(), resId, Toast.LENGTH_SHORT).show()
+        // 可能从 Dispatchers.IO 协程调用（R14 自动恢复挂在刷新的 IO 协程内）：
+        // Toast 要求带 Looper 的线程，直接在子线程调用会 FATAL 崩溃并杀掉
+        // 整个进程（实机取证：进程死 → VPN 服务随之被杀）。统一 post 主线程。
+        val app = getApplication<Application>()
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            Toast.makeText(app, resId, Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun openAccessibilitySettings() {

@@ -1,5 +1,5 @@
 [versions]
-agp = "9.3.2"
+agp = "9.3.3"
 coreKtx = "1.10.1"
 junit = "4.13.2"
 junitVersion = "1.1.5"
@@ -11,7 +11,7 @@ composeBom = "2026.02.01"
 materialIconsExtended = "1.7.8"
 navigationCompose = "2.8.5"
 # ---- 阶段 A 新增 ----
-ksp = "2.2.10-2.0.2"
+ksp = "2.3.6"
 room = "2.8.5"
 datastore = "1.2.1"
 coroutines = "1.9.0"

@@ -111,6 +111,22 @@ object SkipDiagnostics {
                 totalClicks = _state.value.totalClicks + 1,
             )
 
+            // 中间态：扫描请求已通过廉价闸门、投递到后台（性能重构后
+            // 主线程不再扫描）。**不计入 totalEvents** —— 事件尚未真正
+            // 处理完成，真实结果稍后由后台以终态覆盖记录；
+            // 否则一次事件会被计数两次，统计口径失真。
+            is ProcessOutcome.Queued -> _state.value.copy(
+                lastPackageName = packageName,
+                lastEventType = eventType,
+                lastReason = null,
+                lastOutcome = "扫描已投递后台（等最新界面合并）",
+                availableRuleCount = ruleCount,
+                lastCostMs = costMs,
+                maxCostMs = maxOf(_state.value.maxCostMs, costMs),
+                slowEventCount = slowEventCount,
+                updatedAt = now,
+            )
+
             // 点击已投递到后台线程，尚未落地 → 不能计入成功点击数
             is ProcessOutcome.ClickScheduled -> _state.value.copy(
                 lastPackageName = packageName,

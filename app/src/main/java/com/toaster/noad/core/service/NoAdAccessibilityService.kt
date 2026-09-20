@@ -112,13 +112,17 @@ class NoAdAccessibilityService : AccessibilityService() {
 
         val container = NoAdApplication.containerOf(this)
 
+        // 点击执行器：以「注入函数」形式交给事件处理器 ——
+        // EventProcessor 因此不依赖 AccessibilityService，
+        // 使事件流水线（合并/投递/闸门顺序/线程契约）可在 JVM 上完整测试
+        val clickExecutor = ClickExecutor(this)
         processor = EventProcessor(
             // 复用容器中的缓存实例，而非在服务内新建：
             // 服务可能被系统反复解绑/重连，每次新建会重复订阅 Flow
             ruleCache = container.s1RuleCache,
-            clickExecutor = ClickExecutor(this),
+            clickAction = { root, match -> clickExecutor.execute(root, match) },
             scope = ioScope,
-            // 点击在后台线程执行，届时重新取根节点。
+            // 点击/扫描在后台线程执行，届时重新取根节点。
             // `rootInActiveWindow` 可在任意线程调用，无障碍 API 只要求
             // 调用发生在服务存活期间，不要求主线程。
             rootProvider = { rootInActiveWindow },

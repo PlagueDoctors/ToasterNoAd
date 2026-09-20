@@ -155,6 +155,7 @@ fun HomeRoute(
                         protectionEnabled = uiState.protectionEnabled,
                         accessibility = uiState.accessibility,
                         bySource = blockedBySource,
+                        dnsActive = uiState.dnsActive,
                     )
                 }
             }
@@ -169,6 +170,7 @@ fun HomeRoute(
                         shizukuReady = uiState.shizukuReady,
                         shizukuNeedsPermission = uiState.shizukuNeedsPermission,
                         fixInFlight = uiState.fixingRestricted,
+                        secureRestoreAvailable = uiState.secureRestoreAvailable,
                         onAutoFixRestricted = viewModel::resolveRestrictedSettings,
                         onGrantShizuku = viewModel::grantShizukuPermission,
                         onRestoreAccessibility = viewModel::restoreAccessibilityAuthorization,
@@ -327,14 +329,15 @@ private fun ProtectionToggleCard(
  * （无障碍未授权、VPN 让位、Shizuku 未安装）。此处如实展示，
  * 而不是笼统显示「已保护」。
  *
- * S1 已接入真实运行状态；S2/S3/S4 在后续阶段接入，
- * 当前明确显示为「未接入」而不是伪造成「运行中」。
+ * S1 已接入真实运行状态；S2 已接入（阶段 D，DNS 过滤 = VPN TUN 在跑）；
+ * S3/S4 在后续阶段接入，当前明确显示为「未接入」而不是伪造成「运行中」。
  */
 @Composable
 private fun StrategyStatusList(
     protectionEnabled: Boolean,
     accessibility: AccessibilityState,
     bySource: Map<InterceptSource, Int>,
+    dnsActive: Boolean,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         InterceptSource.entries.forEach { source ->
@@ -342,8 +345,10 @@ private fun StrategyStatusList(
                 InterceptSource.ACCESSIBILITY ->
                     accessibility.isEffectivelyActive to true
 
-                // 以下三种策略尚未实现，明确标记为未接入
-                InterceptSource.DNS,
+                // S2 已接线：意图（模式选中）× 运行事实（VpnStateHolder）
+                InterceptSource.DNS -> dnsActive to true
+
+                // 以下两种策略尚未实现，明确标记为未接入
                 InterceptSource.VPN,
                 InterceptSource.APP_FIREWALL,
                 -> false to false
@@ -493,11 +498,14 @@ private fun BlockedAppRow(app: TopBlockedAppItem, modifier: Modifier = Modifier)
  * - **其余**（未装 Shizuku / 探测未过）：维持手动图文引导，
  *   不新增按钮 —— 功能缺失不该挤占本就紧张的提示空间
  *
- * ## R12 授权恢复
+ * ## R12/R13 授权恢复
  *
  * ROM「一键清理」按 force-stop 语义撤销无障碍授权后，用户被迫重跑设置。
- * 在「去系统设置」分支旁提供一键恢复（[onRestoreAccessibility]，
- * 需 Shizuku 就绪）：read-merge-write 保护其他应用条目，回读验证后才报成功。
+ * 在「去系统设置」分支旁提供一键恢复（[onRestoreAccessibility]）：
+ * read-merge-write 保护其他应用条目，回读验证后才报成功。
+ * 展示条件与文案跟随**实际通道**（R13）：有 adb 高级授权
+ * （[secureRestoreAvailable]）时无需 Shizuku 也会展示、文案不带
+ * Shizuku 字样；否则 Shizuku 就绪时展示。
  */
 @Composable
 private fun AccessibilityGuideCard(
@@ -505,6 +513,7 @@ private fun AccessibilityGuideCard(
     shizukuReady: Boolean,
     shizukuNeedsPermission: Boolean,
     fixInFlight: Boolean,
+    secureRestoreAvailable: Boolean,
     onAutoFixRestricted: () -> Unit,
     onGrantShizuku: () -> Unit,
     onRestoreAccessibility: () -> Unit,
@@ -622,10 +631,12 @@ private fun AccessibilityGuideCard(
                         }
                     }
 
-                    // Shizuku 授权恢复（R12）：ROM「一键清理」按 force-stop
-                    // 撤销授权后的一键修复。只在 Shizuku 就绪时展示；
+                    // 授权恢复（R12 Shizuku / R13 adb 高级授权）：
+                    // ROM「一键清理」按 force-stop 撤销授权后的一键修复。
+                    // 展示条件与文案跟随实际通道（与门面的通道优先级一致：
+                    // WRITE_SECURE_SETTINGS 优先于 Shizuku）；
                     // 与「自动解除」共用 fixInFlight 防重入。
-                    if (shizukuReady) {
+                    if (shizukuReady || secureRestoreAvailable) {
                         Spacer(Modifier.height(8.dp))
                         OutlinedButton(
                             onClick = onRestoreAccessibility,
@@ -635,10 +646,12 @@ private fun AccessibilityGuideCard(
                         ) {
                             Text(
                                 stringResource(
-                                    if (fixInFlight) {
-                                        R.string.shizuku_restore_running
-                                    } else {
-                                        R.string.shizuku_restore_action
+                                    when {
+                                        fixInFlight -> R.string.shizuku_restore_running
+                                        // 已具备高级授权 → 实际走的是无 Shizuku 通道，
+                                        // 文案不能谎称「用 Shizuku」
+                                        secureRestoreAvailable -> R.string.restore_action_plain
+                                        else -> R.string.shizuku_restore_action
                                     },
                                 ),
                             )

@@ -14,8 +14,8 @@ android {
         applicationId = "com.toaster.noad"
         minSdk = 30
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 10
+        versionName = "1.4-s4phase"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

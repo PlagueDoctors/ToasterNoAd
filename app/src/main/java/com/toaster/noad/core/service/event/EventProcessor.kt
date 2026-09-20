@@ -5,7 +5,6 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.toaster.noad.core.engine.ui.AntiMisclickGate
-import com.toaster.noad.core.engine.ui.ClickExecutor
 import com.toaster.noad.core.engine.ui.ClickMethod
 import com.toaster.noad.core.engine.ui.ClickOutcome
 import com.toaster.noad.core.engine.ui.MatchResult
@@ -13,15 +12,12 @@ import com.toaster.noad.core.engine.ui.NodeRecycler
 import com.toaster.noad.core.engine.ui.NodeSnapshot
 import com.toaster.noad.core.engine.ui.UiMatcher
 import com.toaster.noad.core.engine.ui.UiTreeScanner
-import com.toaster.noad.core.model.MatchMode
 import com.toaster.noad.core.model.SkipRule
-import com.toaster.noad.core.model.TargetType
 import com.toaster.noad.core.repository.S1RuleCache
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlin.coroutines.CoroutineContext
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 事件未被处理的原因。
@@ -134,6 +130,24 @@ sealed interface ProcessOutcome {
     ) : ProcessOutcome, WithPackage, WithRuleCount
 
     /**
+     * 已通过全部廉价闸门，扫描任务已投递到后台（性能重构新增）。
+     *
+     * ## 为什么必须有这个中间态
+     *
+     * 重构后主线程只做零 IPC 的闸门并投递请求，真正的扫描/匹配/点击
+     * 都在后台单消费者中完成。若投递后返回 [Ignored]，诊断会显示
+     * "被丢弃"；若返回 [ClickScheduled] 则更是撒谎 —— 此时**还没有
+     * 扫描过任何节点**。
+     *
+     * 因此本类型表达：「闸门已过、结果未定、已排队」。
+     * 后台完成后会以真实结果覆盖诊断（见 [SkipDiagnostics.record]）。
+     */
+    data class Queued(
+        override val packageName: String? = null,
+        override val ruleCount: Int = 0,
+    ) : ProcessOutcome, WithPackage, WithRuleCount
+
+    /**
      * 已命中规则、点击已投递到后台线程。
      *
      * ## 为什么不能直接复用 [Clicked]
@@ -183,37 +197,80 @@ sealed interface ProcessOutcome {
 /**
  * S1 事件处理器。
  *
- * ## 执行位置与性能约束
+ * ## 执行位置与性能约束（★ 性能重构的核心）
  *
- * `onAccessibilityEvent` 运行在**主线程**，且调用极其频繁
- * （一次界面变化可产生数次回调）。因此本处理器的原则是：
+ * `onAccessibilityEvent` 运行在**主线程**，一次应用启动会连续产生
+ * 数十次 `TYPE_WINDOW_CONTENT_CHANGED`。重构前的处理链在主线程上
+ * 完成了**节点树遍历**：一次扫描按节点逐个读取 12 个字段
+ * （viewId/text/className/clickable/visible/bounds…），**每个字段都是
+ * 一次跨进程 IPC** —— 一个 500 节点的界面就是数千次 IPC、数百毫秒。
+ * 数十个事件排队等待，用户感知就是「启动后要等两秒才跳过广告」。
  *
- * 1. **最快失败**：包名不在纳管集合内立刻返回，不遍历节点树
- * 2. **不查数据库**：规则查询走内存缓存（[S1RuleCache]）
- * 3. **不写数据库**：命中后只派发点击并投递日志到协程，写库在 IO 线程
- * 4. **不过度匹配**：一次事件最多点击一个节点
+ * 重构后的两段式流水线：
  *
- * ## 线程模型
+ * ```
+ * 主线程（零 IPC，必须尽快返回）
+ *   闸门1 包名/纳管/规则数（内存哈希查表）
+ *   → 闸门2 事件类型
+ *   → 闸门2.5 廉价预筛（事件自带文本，纯字符串）
+ *   → 提取纯数据 ScanRequest，投递到 CONFLATED 队列
+ *   → return Queued
  *
- * - 匹配与点击：主线程（无障碍 API 要求）
- * - 日志写库：IO 线程（通过 [scope]）
+ * 后台单消费者（扫描的重活全在这里）
+ *   取最新请求（连续事件自动合并）→ 窗口重置（如有）→ 闸门3 Activity
+ *   → 扫描节点树 → 匹配 → 防误点闸门 → 投递点击（独立协程）→ 记录诊断
+ * ```
+ *
+ * ## 为什么「合并」是等价而非降级
+ *
+ * 扫描的对象是**当前界面快照**（`rootInActiveWindow`），不是事件对象。
+ * 因此连续 N 个事件所对应的最后一次扫描**包含前 N-1 次能看到的一切**。
+ * 合并只是免除了对同一界面状态的重复扫描，**不丢任何可观测信息**。
+ * 这是把「启动期数十次全树扫描」压成「1~2 次」的关键。
+ *
+ * ## 线程契约
+ *
+ * - [process]：主线程；只读内存 + 纯字符串运算 + 一次 `trySend`
+ * - 消费者协程：构造时传入的 [scope]（生产为 IO 调度器），串行处理
+ * - 点击执行：消费者内再 `launch` 一个任务（手势 40ms 播放不阻塞后续扫描）
+ * - [AntiMisclickGate] 为**非线程安全**的普通 Map：只被消费者线程访问；
+ *   [onWindowChanged] 不直接 `reset()` 而是置原子标记，消费者读取后
+ *   在本线程执行 reset，消除跨线程风险。
  */
 class EventProcessor(
     private val ruleCache: S1RuleCache,
-    private val clickExecutor: ClickExecutor,
+    /**
+     * 点击执行函数。
+     *
+     * 注入函数而非 `ClickExecutor` 实例：后者构造需要
+     * `AccessibilityService`，会让整个事件流水线（合并、投递、
+     * 闸门顺序、线程契约）永远无法在 JVM 上被验证。
+     */
+    private val clickAction: suspend (AccessibilityNodeInfo?, MatchResult) -> ClickOutcome,
     private val scope: CoroutineScope,
     /**
      * 提供"当下有效"的界面根节点。
      *
-     * 点击被投递到后台线程执行，因此执行时必须**重新取一次**根节点 ——
-     * 同步阶段拿到的节点在等待调度期间可能已失效。
-     *
-     * 声明为 `() -> AccessibilityNodeInfo?` 而非传值：无障碍 API
-     * （`rootInActiveWindow`）可在任意线程调用，届时再取即可。
+     * **可在任意线程调用**：无障碍 API 只要求"调用发生在服务存活期间"。
+     * 生产实现为 `{ rootInActiveWindow }`；消费者线程调用。
      */
     private val rootProvider: () -> AccessibilityNodeInfo? = { null },
     private val matcher: UiMatcher = UiMatcher(),
     private val gate: AntiMisclickGate = AntiMisclickGate(),
+    /**
+     * 单调时钟（毫秒）。
+     *
+     * 注入而非直接调用 `SystemClock.elapsedRealtime()`：
+     * 后者是 Android API，在 JVM 单测中会抛 "not mocked" ——
+     * 而它位于消费者线程的第一行，异常会被 `runCatching` 吞掉，
+     * 表现为「后台扫描从未发生」的诡异现象（本轮实测踩到）。
+     * 注入后整个事件流水线在 JVM 上完全可测（项目既有时钟注入惯例）。
+     */
+    private val clock: () -> Long = { SystemClock.elapsedRealtime() },
+    /**
+     * 日志出口（注入以便单测静音；生产默认走 logcat）。
+     */
+    private val log: (String) -> Unit = { Log.d(TAG, it) },
     /**
      * 拦截回调。
      *
@@ -227,90 +284,151 @@ class EventProcessor(
     private val onIntercepted: suspend (InterceptRecord) -> Unit = {},
 ) {
 
-    /** 慢事件累计数，供诊断展示；仅由主线程写入，无需同步 */
-    private var slowEventCount = 0
+    /**
+     * 慢事件累计数（后台处理耗时 ≥ 阈值）。
+     * 消费者线程写、任意线程读展示，因此用原子类型。
+     */
+    private val slowEventCount = AtomicInteger(0)
 
     /**
-     * 用于点击任务的默认调度器。
+     * 待处理请求槽位：**最新覆盖**（合并语义见 [LatestRequestQueue]）。
      *
-     * 从 [scope] 取而非新建：作用域的生命周期（进程级）才是正确的，
-     * 点击任务必须能活过单次事件回调。
+     * 用「只保留最新」替代 FIFO 队列 —— 扫描对象是当前界面快照，
+     * 连续 N 个请求中只有最后一个是「信息最全」的。
      */
-    private val handoffContext: CoroutineContext get() = scope.coroutineContext
+    private val pendingRequests = LatestRequestQueue<ScanRequest>()
+
+    /** 消费者是否正在运行（保证同一时刻只有一个 drain 循环，即串行消费） */
+    private val workerActive = AtomicBoolean(false)
+
+    /**
+     * 窗口切换重置标记。
+     *
+     * 不能用请求字段携带：连续的窗口切换请求可能被合并覆盖，
+     * 而**任何一次**窗口切换都必须执行重置，否则会残留上一个界面的
+     * 防误点冷却（历史 bug：新界面的广告点不掉）。
+     * 因此用原子标记累积（OR 语义），由消费者读取并清除。
+     */
+    private val pendingWindowReset = AtomicBoolean(false)
+
+    /** 一次待扫描请求（纯数据，主线程提取，不含任何 Android 引用） */
+    private class ScanRequest(
+        val packageName: String,
+        val eventType: Int,
+        val activityName: String?,
+        val rules: List<SkipRule>,
+    )
+
+    /**
+     * 调度一次后台处理。
+     *
+     * 「单消费者 + 最新覆盖」的实现：
+     * - [pendingRequests] 覆盖式保存最新请求（合并）
+     * - [workerActive] 保证同一时刻只有一个 drain 循环在跑（串行，
+     *   这也让非线程安全的 [AntiMisclickGate] 无需加锁）
+     * - drain 取空槽位后做一次「收尾重查」：清空与置位之间刚到达的
+     *   新请求不会被漏掉
+     *
+     * ⚠️ **消费循环运行在 [scope] 上（生产为 IO 调度器）**，而不是在
+     * 本方法（主线程）内 —— 这是「扫描脱离主线程」的落点。
+     */
+    private fun schedule(request: ScanRequest) {
+        pendingRequests.offer(request)
+        if (workerActive.compareAndSet(false, true)) {
+            scope.launch { drain() }
+        }
+    }
+
+    /** 后台单消费者：串行消化槽位中的最新请求，直到无待处理项 */
+    private suspend fun drain() {
+        try {
+            while (true) {
+                val request = pendingRequests.poll() ?: break
+                runCatching { consume(request) }
+                    .onFailure { log("后台处理异常: ${it.javaClass.simpleName}") }
+            }
+        } finally {
+            workerActive.set(false)
+            // 收尾重查：poll 返回 null 与置位清零之间到达的请求
+            if (pendingRequests.hasPending && workerActive.compareAndSet(false, true)) {
+                scope.launch { drain() }
+            }
+        }
+    }
 
     /**
      * 处理一个无障碍事件（**主线程必须尽快返回**）。
      *
-     * ## ⚠️ 不在本方法内执行点击
+     * 本方法**不遍历节点树**（重构前的主要瓶颈）：只做零 IPC 的闸门
+     * 判定，把「扫描请求」投递到后台队列后立即返回 [ProcessOutcome.Queued]。
      *
-     * 本方法由 `onAccessibilityEvent` 同步调用，运行在**主线程**。
-     * 而 [`ClickExecutor.execute`] 内部会：
-     *
-     * 1. `findByIndex` —— 从头 BFS 回查真实节点（数百次 `getChild` IPC）
-     * 2. `ACTION_CLICK` / `getParent` 链 —— 又是若干次 IPC
-     * 3. 失败时 `dispatchGesture` —— 手势需要**约 40ms 播放时间**
-     *
-     * 这些全部累加在主线程上。实测用户报告的"启动任何应用都有半秒延迟"
-     * 正是由此而来：`onAccessibilityEvent` 占用主线程期间，
-     * 系统无法把输入与绘制交给刚启动的前台应用。
-     *
-     * 因此本方法只做"判定 + 投递"，点击交给 [handoffScope] 上的异步任务。
-     *
-     * @param handoffScope 点击任务的作用域。为 null 时**不执行点击**而是
-     *        返回 [ProcessOutcome.Deferred] —— 让"缺少执行环境"表现为
-     *        可观测的显式结果，而不是静默不点。
+     * @param handoffScope 执行环境存在性标记。为 null 时返回
+     *        [ProcessOutcome.Deferred]（接线错误显式化，见其文档）；
+     *        非 null 时实际执行由消费者协程完成。
      */
     fun process(
         event: AccessibilityEvent,
         rootProvider: () -> AccessibilityNodeInfo?,
         handoffScope: CoroutineScope? = null,
     ): ProcessOutcome {
-        val startedAt = SystemClock.elapsedRealtime()
-        val outcome = processInternal(event, rootProvider, handoffScope)
-        val costMs = SystemClock.elapsedRealtime() - startedAt
+        val startedAt = clock()
+        val outcome = submit(
+            packageName = event.packageName?.toString(),
+            eventType = event.eventType,
+            activityName = event.className?.toString(),
+            candidates = eventCandidates(event),
+            hasHandoff = handoffScope != null,
+        )
+        val costMs = clock() - startedAt
 
-        // 慢事件计数在引擎侧维护：诊断对象只做无状态存取，
-        // 避免"阈值判断"这种策略散落到展示层。
-        if (costMs >= SkipDiagnosticsState.SLOW_EVENT_THRESHOLD_MS) {
-            slowEventCount++
-        }
-
-        // 记录诊断供 UI 展示。放在这里而非各 return 点，
-        // 是为了保证**任何**返回路径都被覆盖 —— 漏记一条就等于
-        // 用户看到"没反应"却查不出原因。
+        // 主线程记录的是「闸门耗时」——它应当恒为个位数毫秒。
+        // 若这里持续出现几十毫秒，说明闸门层退化（如误加了 IPC）。
         SkipDiagnostics.record(
             packageName = outcome.packageNameOf(event),
             eventType = event.eventType,
             outcome = outcome,
             ruleCount = outcome.ruleCountOf(),
             costMs = costMs,
-            slowEventCount = slowEventCount,
+            slowEventCount = slowEventCount.get(),
         )
         return outcome
     }
 
-    /** 从事件取包名，供诊断记录使用（与 [processInternal] 的判定口径一致） */
+    /** 从事件取包名，供诊断记录使用（与 [submit] 的判定口径一致） */
     private fun ProcessOutcome.packageNameOf(event: AccessibilityEvent): String? =
         (this as? ProcessOutcome.WithPackage)?.packageName ?: event.packageName?.toString()
 
+    /** 取本次判定携带的规则数（未走到规则查询的路径为 0） */
     private fun ProcessOutcome.ruleCountOf(): Int = when (this) {
         is ProcessOutcome.WithRuleCount -> ruleCount
         else -> 0
     }
 
-    private fun processInternal(
-        event: AccessibilityEvent,
-        rootProvider: () -> AccessibilityNodeInfo?,
-        handoffScope: CoroutineScope?,
+    /**
+     * 纯数据闸门入口（**JVM 可测的核心**）。
+     *
+     * 与 [process] 的关系：后者只是把 `AccessibilityEvent` 的字段
+     * 提取出来（`packageName` / `eventType` / `className` / 文本候选），
+     * 真正的判定逻辑全部在本方法内 —— 因此整套闸门顺序、预筛语义、
+     * 合并投递都能在 `EventProcessorTest` 中被直接验证，
+     * 无需（也无法）在 JVM 上构造 Android 的 `AccessibilityEvent`。
+     *
+     * 【重要】从工程角度，把「可测内核」与「框架适配层」分开是特意为之：
+     * 适配层只做字段提取（机械翻译，无逻辑），内核承载全部决策。
+     */
+    internal fun submit(
+        packageName: String?,
+        eventType: Int,
+        activityName: String?,
+        candidates: List<String>,
+        hasHandoff: Boolean,
     ): ProcessOutcome {
-        val packageName = event.packageName?.toString()
         if (packageName.isNullOrBlank()) {
             return ProcessOutcome.Ignored(SkipReason.UNKNOWN_PACKAGE)
         }
 
         // ---- 第 1 道闸：包名 ----
-        // 绝大多数事件在这一步返回，这是性能的关键。
-        // 注意这里区分了两种"没规则"：应用本身没被纳管，还是纳管了但没有规则。
+        // 绝大多数事件在这一步返回（用户正常使用时事件几乎全部来自未纳管应用）。
         if (!ruleCache.isManaged(packageName)) {
             return ProcessOutcome.Ignored(SkipReason.APP_NOT_MANAGED, packageName)
         }
@@ -320,87 +438,126 @@ class EventProcessor(
         }
 
         // ---- 第 2 道闸：事件类型 ----
-        if (!isRelevantEventType(event.eventType)) {
+        if (!isRelevantEventType(eventType)) {
             return ProcessOutcome.Ignored(SkipReason.IRRELEVANT_EVENT, packageName, rules.size)
         }
 
-        val activityName = event.className?.toString()
-
-        // ---- 第 2.5 道闸：廉价预筛（★ 消除"启动应用卡一下"的关键）----
-        // 走到这里意味着应用已纳管且有规则，于是每次内容变化都要遍历整棵
-        // 节点树 —— 一个 500 节点的界面会产生数百次 getChild IPC，
-        // 单次轻松超过 100ms，叠加在一次启动过程中就是用户感知的延迟。
-        //
-        // 但事件本身通常**已经携带了目标文本**（跳过按钮的
-        // TYPE_WINDOW_CONTENT_CHANGED 事件 text 即「跳过 1」）。
-        // 先用这份廉价信息判断"这次事件有没有可能命中"，
-        // 不做任何 IPC 就能丢弃绝大多数无关事件。
-        if (!eventMayMatch(rules, event, activityName)) {
+        // ---- 第 2.5 道闸：廉价预筛 ----
+        // 纯字符串判定（事件自带文本），不做任何 IPC。
+        // ⚠️ 只放宽、不收紧：判据见 [EventPreFilter]。
+        if (!EventPreFilter.mayMatch(rules, candidates, activityName)) {
             return ProcessOutcome.Ignored(SkipReason.PRE_FILTERED, packageName, rules.size)
         }
 
-        // ---- 第 3 道闸：Activity 限定 ----
-        val applicable = filterByActivity(rules, activityName)
-        if (applicable.isEmpty()) {
-            return ProcessOutcome.Ignored(SkipReason.ACTIVITY_MISMATCH, packageName, rules.size)
+        // ---- 执行环境检查（接线错误的显式化）----
+        if (!hasHandoff) {
+            return ProcessOutcome.Deferred(NO_HANDOFF_PLACEHOLDER, packageName, rules.size)
         }
 
-        // ---- 遍历节点树 ----
+        // ---- 投递后台（最新覆盖合并）----
+        schedule(
+            ScanRequest(
+                packageName = packageName,
+                eventType = eventType,
+                activityName = activityName,
+                rules = rules,
+            ),
+        )
+        return ProcessOutcome.Queued(packageName, rules.size)
+    }
+
+    /**
+     * 消费者：后台串行处理一次扫描请求。
+     *
+     * 串行（单消费者）的三个理由：
+     * 1. [AntiMisclickGate] 是非线程安全的普通 Map，串行天然安全；
+     * 2. 扫描本身是数百次 IPC，并发扫描只会互相争抢 binder 通道；
+     * 3. 合并语义下队列长度恒为 0 或 1，串行不存在吞吐瓶颈。
+     */
+    private fun consume(request: ScanRequest) {
+        val startedAt = clock()
+
+        // 窗口切换重置：必须在本次扫描前完成
+        if (pendingWindowReset.getAndSet(false)) {
+            gate.reset()
+        }
+
+        val outcome = scanAndMatch(request)
+        val costMs = clock() - startedAt
+
+        if (costMs >= SkipDiagnosticsState.SLOW_EVENT_THRESHOLD_MS) {
+            slowEventCount.incrementAndGet()
+        }
+
+        SkipDiagnostics.record(
+            packageName = request.packageName,
+            eventType = request.eventType,
+            outcome = outcome,
+            ruleCount = request.rules.size,
+            costMs = costMs,
+            slowEventCount = slowEventCount.get(),
+        )
+    }
+
+    /** 扫描 + 匹配 + 闸门 + 投递点击（消费者线程） */
+    private fun scanAndMatch(request: ScanRequest): ProcessOutcome {
+        // ---- 第 3 道闸：Activity 限定 ----
+        val applicable = filterByActivity(request.rules, request.activityName)
+        if (applicable.isEmpty()) {
+            return ProcessOutcome.Ignored(
+                SkipReason.ACTIVITY_MISMATCH, request.packageName, request.rules.size,
+            )
+        }
+
+        // ---- 遍历节点树（唯一昂贵步骤，已脱离主线程）----
         val root = rootProvider()
-            ?: return ProcessOutcome.Ignored(SkipReason.NO_ROOT_NODE, packageName, rules.size)
+            ?: return ProcessOutcome.Ignored(
+                SkipReason.NO_ROOT_NODE, request.packageName, request.rules.size,
+            )
         val nodes: List<NodeSnapshot> = try {
-            UiTreeScanner.scan(root, packageName)
+            UiTreeScanner.scan(root, request.packageName)
         } finally {
-            // 调用方（服务）分配的 root 由本处负责回收
             NodeRecycler.recycle(root)
         }
 
         if (nodes.isEmpty()) {
-            return ProcessOutcome.Ignored(SkipReason.EMPTY_NODE_TREE, packageName, rules.size)
+            return ProcessOutcome.Ignored(
+                SkipReason.EMPTY_NODE_TREE, request.packageName, request.rules.size,
+            )
         }
 
         // ---- 匹配 ----
         val best = matcher.matchBest(applicable, nodes)
-            ?: return ProcessOutcome.Ignored(SkipReason.NO_NODE_MATCH, packageName, rules.size)
+            ?: return ProcessOutcome.Ignored(
+                SkipReason.NO_NODE_MATCH, request.packageName, request.rules.size,
+            )
 
         // ---- 第 4 道闸：防误点 ----
         val ruleId = best.rule.id.takeIf { it != 0L } ?: best.rule.name.hashCode().toLong()
         val nodeKey = AntiMisclickGate.nodeKey(best.node)
         val now = System.currentTimeMillis()
         if (!gate.tryAcquire(ruleId, nodeKey, now)) {
-            return ProcessOutcome.Throttled(best.rule.name, packageName, rules.size)
+            return ProcessOutcome.Throttled(best.rule.name, request.packageName, request.rules.size)
         }
 
-        // ---- 投递点击（★ 绝不在主线程执行）----
-        // 见 process 的文档：点击包含二次 BFS + 多次 IPC + 40ms 手势播放，
-        // 全部累加在主线程上就是用户感知的启动延迟。
-        val scope = handoffScope
-            ?: return ProcessOutcome.Deferred(best.rule.name, packageName, rules.size)
-
-        scope.launch(handoffContext) {
-            performClick(best, packageName, activityName, rules.size)
+        // ---- 点击独立协程：手势 40ms 播放 + 二次 BFS 不阻塞下一次扫描 ----
+        scope.launch {
+            performClick(best, request.packageName, request.activityName, request.rules.size)
         }
-
-        return ProcessOutcome.ClickScheduled(best, packageName, rules.size)
+        return ProcessOutcome.ClickScheduled(best, request.packageName, request.rules.size)
     }
 
     /**
-     * 在后台线程执行点击，并在落地后补发拦截日志。
+     * 执行点击并在落地后补发拦截日志。
      *
-     * ## 为什么整个方法都要脱离主线程
-     *
-     * `AccessibilityNodeInfo` 的操作（`performAction` / `getChild`）
-     * 本身是跨进程调用，**不受"必须在主线程"约束** ——
-     * 无障碍服务只要求"调用发生在服务存活期间"。
-     *
-     * 因此把整段放到 [Dispatchers.Default] 执行：
-     * 二次 BFS 与 IPC 全部脱离主线程，主线程在匹配完成的那一刻就释放。
+     * `AccessibilityNodeInfo` 的操作是跨进程调用，**不受"必须在主线程"
+     * 约束** —— 无障碍服务只要求"调用发生在服务存活期间"。
      *
      * ## 失败不回写诊断
      *
      * 本方法异步执行，其失败原因无法回填到"本次事件"的诊断记录上
      * （会被后续事件覆盖，造成错乱）。因此失败只写日志，
-     * 由 [LogRepository] 侧如实记录。
+     * 由 LogRepository 侧如实记录。
      */
     private suspend fun performClick(
         match: MatchResult,
@@ -408,54 +565,22 @@ class EventProcessor(
         activityName: String?,
         ruleCount: Int,
     ) {
-        val result = withContext(Dispatchers.Default) {
-            // 重新取根节点：同步阶段拿到的那个在等待调度期间可能已失效
-            val gestureRoot = runCatching { rootProvider() }.getOrNull()
-            try {
-                clickExecutor.execute(gestureRoot, match)
-            } finally {
-                NodeRecycler.recycle(gestureRoot)
-            }
+        // 重新取根节点：同步阶段拿到的那个在等待调度期间可能已失效
+        val gestureRoot = runCatching { rootProvider() }.getOrNull()
+        val result = try {
+            clickAction(gestureRoot, match)
+        } finally {
+            NodeRecycler.recycle(gestureRoot)
         }
 
         when (result) {
             is ClickOutcome.Success -> emitLog(match, packageName, activityName, result.method)
-            is ClickOutcome.Failed -> debugLog("点击失败: ${result.reason}（$packageName）")
+            is ClickOutcome.Failed -> log("点击失败: ${result.reason}（$packageName）")
         }
     }
 
     /**
-     * 廉价预筛：判断事件本身是否**有可能**命中任一规则。
-     *
-     * 判据集中在 [EventPreFilter]（无 Android 依赖，可在 JVM 上测试）。
-     * 这里只负责把 `AccessibilityEvent` 翻译成它需要的入参。
-     *
-     * ## 为什么这一层能大幅降低卡顿
-     *
-     * 应用启动时会连续产生数十次 `TYPE_WINDOW_CONTENT_CHANGED`。
-     * 修改前每一次都要遍历整棵节点树（`rootProvider()` + `scan()`），
-     * 而其中绝大多数与"跳过按钮出现"无关。一个 500 节点的界面
-     * 单次遍历就是数百次 `getChild` IPC，轻松超过 100ms ——
-     * 这些耗时全部累加在主线程上，用户感知即"启动应用卡一下"。
-     *
-     * ⚠️ **只放宽、不收紧**：预筛一旦比 [UiMatcher] 严格，就会出现
-     * "事件被预筛丢弃、永远走不到匹配"的静默漏拦，其现象与
-     * "规则写错"完全一致。判据与理由详见 [EventPreFilter]。
-     */
-    private fun eventMayMatch(
-        rules: List<SkipRule>,
-        event: AccessibilityEvent,
-        activityName: String?,
-    ): Boolean = EventPreFilter.mayMatch(
-        rules = rules,
-        candidates = eventCandidates(event),
-        activityName = activityName,
-    )
-
-    /**
      * 读取事件自带的文本候选（不产生任何 IPC）。
-     *
-     * ## 能读到什么、读不到什么
      *
      * `AccessibilityEvent` 携带的是**事件自身的描述**，不是节点属性：
      * - `event.text` → `List<CharSequence>`，内容变化事件常在此携带节点文本
@@ -473,14 +598,17 @@ class EventProcessor(
     }
 
     /**
-     * 界面发生窗口切换时重置防误点记账。
+     * 界面发生窗口切换时标记「需要重置防误点记账」。
      *
      * 不重置会导致"上一个界面的冷却时间"影响新界面 ——
      * 用户从应用 A 切到应用 B，B 的开屏广告因 A 的残留冷却而点不掉。
      * 这类问题在实机调试中表现为"偶发失效"，极难定位，因此必须主动清理。
+     *
+     * 本方法**由主线程调用**，只做一次原子置位；真正的 `reset()`
+     * 在消费者线程执行（[AntiMisclickGate] 非线程安全）。
      */
     fun onWindowChanged() {
-        gate.reset()
+        pendingWindowReset.set(true)
     }
 
     /**
@@ -528,16 +656,14 @@ class EventProcessor(
             method = method,
             confidence = match.confidence,
         )
-        // 在 IO 作用域启动协程：主线程只做一次协程创建，不做任何 IO
         scope.launch { onIntercepted(record) }
-    }
-
-    private fun debugLog(message: String) {
-        Log.d(TAG, message)
     }
 
     private companion object {
         const val TAG = "NoAdEventProcessor"
+
+        /** Deferred 分支在「未携带执行环境」时使用的规则名占位 */
+        const val NO_HANDOFF_PLACEHOLDER = "(未投递)"
     }
 }
 

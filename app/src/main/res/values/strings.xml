@@ -144,6 +144,22 @@
     <string name="shizuku_restore_action">用 Shizuku 恢复无障碍授权</string>
     <string name="shizuku_restore_running">正在恢复…</string>
     <string name="shizuku_restore_toast_success">授权已恢复，服务将自动重新连接</string>
+    <string name="restore_toast_auto_success">检测到授权丢失，已自动恢复</string>
+    <string name="network_s3_not_available">全流量过滤需要完整的 TCP/UDP 转发栈，尚未实现；当前推荐使用 DNS 过滤</string>
+    <string name="network_s4_not_available">应用级断网将在后续版本接入，需 Shizuku</string>
+    <string name="network_vpn_permission_denied">未授予 VPN 权限，DNS 过滤未开启</string>
+    <string name="network_vpn_start_failed">DNS 过滤启动失败，请重试</string>
     <string name="shizuku_restore_toast_already">授权记录仍在，若服务未运行请稍候或重启应用</string>
     <string name="shizuku_restore_toast_failed">恢复失败，请到系统设置手动开启</string>
+
+    <!-- R13 高级授权（adb 授予 WRITE_SECURE_SETTINGS，无 Shizuku 恢复通道） -->
+    <string name="restore_action_plain">恢复无障碍授权</string>
+    <string name="advanced_grant_row_title">高级授权（adb）</string>
+    <string name="advanced_grant_row_granted">已授予 · 可无 Shizuku 恢复无障碍授权</string>
+    <string name="advanced_grant_row_missing">未授予 · 点击查看说明</string>
+    <string name="advanced_grant_dialog_title">高级授权：adb 写系统设置</string>
+    <string name="advanced_grant_dialog_status_granted">当前状态：已授予 ✓</string>
+    <string name="advanced_grant_dialog_status_missing">当前状态：未授予</string>
+    <string name="advanced_grant_dialog_close">知道了</string>
+    <string name="advanced_grant_dialog_body">授予后，本应用可在无需 Shizuku 的情况下恢复被「一键清理」撤销的无障碍授权；一次授权终身有效（重启不失效，卸载重装后需重新授权）。\n\n操作步骤：\n1. 开启开发者选项与 USB 调试（小米机型需同时开启「USB 调试（安全设置）」）；\n2. 手机连接电脑并确认 adb 可用；\n3. 执行以下命令：\n\nadb shell pm grant %1$s android.permission.WRITE_SECURE_SETTINGS\n\nAndroid 11+ 可改用无线调试：开发者选项 → 无线调试 → 配对设备后 adb connect 同一地址，再执行上述命令。命令执行成功无报错即已授予，回到本页可见状态更新。</string>
 </resources>

@@ -38,6 +38,7 @@ object NoAdViewModelFactory {
                 settingsRepository = container.settingsRepository,
                 sideloadRestrictionController = container.sideloadRestrictionController,
                 accessibilityRecoveryController = container.accessibilityRecoveryController,
+                accessibilityAutoRestorer = container.accessibilityAutoRestorer,
             )
         }
         initializer {
@@ -60,6 +61,7 @@ object NoAdViewModelFactory {
         initializer {
             val container = applicationContainer()
             NetworkViewModel(
+                application = application(),
                 settingsRepository = container.settingsRepository,
                 domainRuleRepository = container.domainRuleRepository,
             )

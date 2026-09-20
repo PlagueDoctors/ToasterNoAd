@@ -162,6 +162,14 @@ class S1RuleCache(
     /** 当前纳管应用数 */
     val managedPackageCount: Int get() = snapshotRef.get().managedPackages.size
 
+    /**
+     * 启用 S4 应用级断网的包集合（供让位降级链路使用）。
+     *
+     * 这条链路：其他 VPN 抢占 → 让位 → 若 Shizuku 的 Chain-3 可用，
+     * 对本集合中的应用执行断网（方案 §6.9「让位 = 降级为应用级防火墙」）。
+     */
+    fun firewallPackages(): Set<String> = snapshotRef.get().firewallPackages
+
     /** 通用规则条数（不含在各应用的计数里，单独暴露供 UI 说明） */
     val globalRuleCount: Int get() = snapshotRef.get().globalRules.size
 
@@ -177,9 +185,25 @@ class S1RuleCache(
      * 用户没纳管某应用时，通用规则同样不会作用于它。
      */
     private fun buildSnapshot(apps: List<TargetApp>, rules: List<SkipRule>): RuleSnapshot {
-        if (apps.isEmpty() || rules.isEmpty()) return RuleSnapshot.EMPTY
+        if (apps.isEmpty()) return RuleSnapshot.EMPTY
 
         val managed = apps.mapTo(HashSet(apps.size)) { it.packageName }
+
+        // S4 断网目标与跳过规则彼此独立：必须在 rules 为空时也保留
+        val firewall = apps
+            .filter { it.appFirewallEnabled }
+            .mapTo(HashSet()) { it.packageName }
+
+        // 没有任何规则时不能整体退化为 EMPTY —— 纳管集合与断网目标仍有效
+        if (rules.isEmpty()) {
+            return RuleSnapshot(
+                byPackage = emptyMap(),
+                globalRules = emptyList(),
+                managedPackages = managed,
+                totalRules = 0,
+                firewallPackages = firewall,
+            )
+        }
 
         // 通用规则与专属规则分开：前者随后附加到每个纳管应用
         val globalRules = ArrayList<SkipRule>()
@@ -206,6 +230,7 @@ class S1RuleCache(
                 globalRules = emptyList(),
                 managedPackages = managed,
                 totalRules = 0,
+                firewallPackages = firewall,
             )
         }
 
@@ -219,6 +244,7 @@ class S1RuleCache(
             globalRules = globalRules.sortedByDescending { it.priority },
             managedPackages = managed,
             totalRules = frozen.values.sumOf { it.size } + globalRules.size,
+            firewallPackages = firewall,
         )
     }
 
@@ -238,6 +264,14 @@ class S1RuleCache(
         val globalRules: List<SkipRule>,
         val managedPackages: Set<String>,
         val totalRules: Int,
+        /**
+         * 启用 S4 应用级断网的包集合（`TargetApp.appFirewallEnabled`）。
+         *
+         * 与跳过规则无关：S4 的断网目标由用户在「应用管理」页单独勾选，
+         * 因此快照在**没有任何跳过规则**时也必须保留这份集合 ——
+         * 否则「只开 S4、不要 S1」的用户会拿不到断网目标。
+         */
+        val firewallPackages: Set<String>,
     ) {
         companion object {
             val EMPTY = RuleSnapshot(
@@ -245,6 +279,7 @@ class S1RuleCache(
                 globalRules = emptyList(),
                 managedPackages = emptySet(),
                 totalRules = 0,
+                firewallPackages = emptySet(),
             )
         }
     }

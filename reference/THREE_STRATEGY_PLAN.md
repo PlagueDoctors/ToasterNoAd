@@ -257,10 +257,14 @@ com.toaster.noad/
 │   │   │   ├── UiMatcher.kt            #   规则匹配（纯逻辑，24 个单测）
 │   │   │   ├── AntiMisclickGate.kt     #   防误点三重闸门（13 个单测）
 │   │   │   └── ClickExecutor.kt        #   三级降级点击
-│   │   ├── dns/                        # 【阶段D】S2
-│   │   │   ├── DnsPacketParser.kt
-│   │   │   ├── DnsInterceptor.kt
-│   │   │   └── DnsUpstreamResolver.kt
+│   │   ├── vpn/                        # 【阶段C/D · 已完成】S2 公共层
+│   │   │   ├── VpnArbitrator.kt        #   让位仲裁（启动决策矩阵）
+│   │   │   ├── VpnTunConfig.kt         #   模式→TUN 参数（S2 铁律纯函数）
+│   │   │   ├── DnsPacketParser.kt      #   DNS 报文解析与响应构造
+│   │   │   ├── DnsInterceptor.kt       #   拦截判定（引擎注入，决策层）
+│   │   │   ├── DnsForwarder.kt         #   protect socket 上游转发（IO 层）
+│   │   │   ├── Ip4UdpPacket.kt         #   IPv4/UDP 字节层（响应复用查询包）
+│   │   │   └── VpnStateHolder.kt       #   运行事实发布（首页状态卡消费）
 │   │   └── net/                        # 【阶段E】S3
 │   │       ├── PacketParser.kt
 │   │       ├── TrafficFilter.kt
@@ -280,8 +284,7 @@ com.toaster.noad/
 │   │   ├── AccessibilityStateHolder.kt      # 【阶段B】服务真实状态（供 UI）
 │   │   ├── AccessibilitySettingsLauncher.kt # 【阶段B】跳转系统设置
 │   │   ├── ProtectionFlags.kt               # 【阶段B】开关内存镜像（供热路径）
-│   │   ├── NoAdVpnService.kt                # 【阶段C】S2 + S3
-│   │   ├── vpn/VpnArbitrator.kt             # 【阶段C】让位仲裁
+│   │   ├── NoAdVpnService.kt                # 【阶段C/D】S2 包循环已通，S3 属阶段E
 │   │   └── event/EventProcessor.kt          # 【阶段B · 已完成】S1 事件流水线
 │   ├── applist/InstalledAppDataSource.kt
 │   ├── designsystem/  navigation/
@@ -327,9 +330,14 @@ override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
 
     val builder = Builder()
         .setSession("NoAd DNS")
-        .addAddress("10.0.0.1", 32)           // 虚拟网卡地址
-        .addDnsServer("10.0.0.1")             // 告诉系统：DNS 服务器是 10.0.0.1
-        .addRoute("10.0.0.1", 32)             // 【关键】只路由这一个地址
+        .addAddress("10.0.0.1", 32)           // 虚拟网卡地址（TUN 自身）
+        .addDnsServer("10.0.0.2")             // 【修订 1.2.4】DNS 用独立虚拟地址：
+                                              // 绝不能复用 TUN 自身地址 —— 发往本机
+                                              // 地址的查询被内核 local 路由表劫持，
+                                              // 永远进不了 TUN 用户态（实机取证：
+                                              // ping 10.0.0.1 得到 ttl=64 本地应答，
+                                              // 应用日志无任何包）
+        .addRoute("10.0.0.2", 32)             // 【修订】只路由 DNS 虚拟地址
         // 注意：绝不调用 addRoute("0.0.0.0", 0)
 ```
 
@@ -2365,16 +2373,379 @@ toast + 系统自动重连无障碍服务，无需再去系统设置；未装/�
 Shizuku 时按钮不出现，回退手动图文引导。
 
 
-### 阶段 C：网络层公共模块
-8. `VpnArbitrator`（让位仲裁）—— **最高优先**
-9. `DnsPacketParser`（`DomainRuleEngine` 已完成）
-10. `NoAdVpnService` 骨架 + 模式分发
+### 授权恢复（R13，2026-09-19）—— adb 高级授权：无 Shizuku 的恢复通道
+
+**问题**：R12 的恢复依赖 Shizuku —— 安装、启动、每次重启后重新拉起
+server，对多数用户是持续负担。查证（Tasker/AutoTools 等成熟应用的
+通行做法）：`adb shell pm grant <pkg> android.permission.WRITE_SECURE_SETTINGS`
+授予的是 install-time 权限，**一次授权终身有效**（重启不清、清数据不丢，
+仅卸载重装失效）；持有后应用可用 ContentResolver 直接读写
+`Settings.Secure`，与 shell 等价地完成恢复。附赠收益：直接写系统设置值
+**不经过设置页 UI 的「受限设置」检查**，R11 要解的 Android 13+
+侧载开关拦截问题在此一并覆盖。
+
+**实现**（复用 R12 决策层，只换 IO 层）：
+
+- 新增 `SecureSettingsAccessibilityRestorer`（`core/service/`，
+  ContentResolver 解释器）：把决策层发出的 shell 形命令
+  （`readEnabledServicesCommand` 等）翻译为 `getString/putString`。
+  关键语义对齐：`getString` 返回 null（键不存在）映射为 `"null"`
+  字面量交给 `parseEntries` 容忍 —— 决策层对「空设置」与 shell
+  看到完全相同的形态；`SecurityException`（权限被撤）传播到
+  `restore()` 统一捕获为 `Failed`，**一个字节都不写**。
+  读写函数为注入参数（主构造），`ContentResolver` 走次构造 ——
+  JVM 全可测
+- 门面 `AccessibilityRecoveryController` 升级双通道优先级：
+  **WRITE_SECURE_SETTINGS 在位 → 优先走 ContentResolver 直写**
+  （与 Shizuku 是否可用无关）→ 否则回退 Shizuku（R12 预检不变）→
+  都没有 → 通道态终态。权限探测是注入函数
+  `hasSecureWritePermission`（JVM 可测），`canRestoreWithoutShizuku()`
+  供 UI 决定按钮展示与文案
+- Manifest 声明 `WRITE_SECURE_SETTINGS`（`tools:ignore="ProtectedPermissions"`，
+  adb 显式授予本就是该权限的系统设计内用法）
+- UI：恢复按钮展示条件改为 `shizukuReady || secureRestoreAvailable`，
+  文案跟随**实际通道**（高级授权在位 → 「恢复无障碍授权」，
+  决不谎称「用 Shizuku」；否则维持原文案）；设置页「增强能力」新增
+  「高级授权（adb）」行 + 说明对话框（adb 命令含运行时包名注入、
+  无线调试引导、小米「USB 调试（安全设置）」提示、当前授权状态
+  ON_RESUME 刷新 —— 与电池豁免行同一自治模式）
+
+**边界不变**：与 R12 相同的 R8 禁止表修订范围 —— 只做用户显式
+点击的一次性恢复；本类不提供任何周期性/后台静默写入入口。
+
+#### 验证证据（R13）
+
+```
+./gradlew :app:testDebugUnitTest → BUILD SUCCESSFUL
+315 tests / 19 test classes, 0 failures, 0 errors, 0 skipped
+  （新增 SecureSettingsAccessibilityRestorerTest 8 条：
+    空设置首恢复/他人保留追加/已存在仅写 master/大小写变体零改写/
+    静默拒绝→Failed/读写 SecurityException→Failed 且零写入/
+    exec null→首读即终止绝不写）
+touch 强制重编译（main+test）→ 0 warning（grep "^w: " 无输出）
+```
+
+实机验证点（由用户执行）：电脑 `adb shell pm grant com.toaster.noad
+android.permission.WRITE_SECURE_SETTINGS` → 设置页「高级授权」行显示
+已授予 → 制造一次被清理的授权丢失 → 首页出现「恢复无障碍授权」
+（无 Shizuku 亦可）→ 点击后自动重连；卸载重装后权限消失属预期。
+
+### 自动恢复（R14，2026-09-19）—— 授权丢失后的无感自检
+
+**问题**：R12/R13 的恢复仍是「用户显式点击」——一键清理后用户还得
+打开应用找到按钮再点。用户提出：只要通道具备，授权丢失就应自动恢复，
+不要手动点击。
+
+**能力边界（必须如实）**：一键清理按 force-stop 处理，进程死后
+JobScheduler / 广播 / 闹钟全部被系统清除，**没有任何机制能在后台唤醒**
+（Android 安全设计，防止杀不死的应用）。因此「全自动后台恢复」物理上
+不可行；能做满的极限是：
+
+1. 进程存活期间授权丢失（系统解绑后设置记录被撤等场景）→ Watchdog
+   广播（解锁/亮屏/授权变化）触发核对；
+2. 进程被杀后用户打开应用 → **启动/回前台自检自动恢复，零点击**
+   （这是主场景：清理后打开应用即恢复，无感）。
+
+**设计**：
+
+- `AutoRestorePolicy`（core/service）：防拉锯节流——30 秒最小间隔 +
+  每进程上限 10 次（手动按钮不受限）。**状态刻意只在进程内**：进程重启
+  即清零，重新打开应用可立即再试一次，正是期望行为；持久化反而会用
+  旧账让用户白等。单调时钟注入（SystemClock JVM 不可 mock，同 Holder 模式）。
+- `AccessibilityAutoRestorer`：通道门 + 策略 + 执行的组合层，全部注入
+  （hasSecureWritePermission / secureRestore）→ JVM 全可测。
+- `AccessibilityRecoveryController.restoreViaSecureChannel()`：仅走
+  WRITE_SECURE_SETTINGS 通道的公开入口，**绝不自动回退 Shizuku** ——
+  adb 高级授权本身是「用户接受无感恢复」的明确表达；Shizuku 依赖
+  Shizuku 进程存活，force-stop 后 binder 已断，静默调用非用户预期。
+  未做 adb 授权的用户自动路径直接短路，**零回归**。
+- `HomeViewModel.maybeAutoRestoreAuthorization()`：挂接在
+  refreshAccessibilityState（init + ON_RESUME）同一 IO 协程内。触发条件
+  全部满足才动手：① 应用内 S1 开关开着（**用户意图锚**——用户想用才恢复；
+  用户去系统设置手动关闭时不会打开本应用，锚天然成立，绝不与用户对抗）；
+  ② `isNotAuthorized`（服务没跑且设置记录没了；仅解绑不触发，系统会自连）；
+  ③ 通道在位且策略允许；④ 无其他特权操作进行中（复用 fixInFlight）。
+- 静默语义：仅 RESTORED 才提示（「检测到授权丢失，已自动恢复」）；
+  ALREADY_PRESENT 是重绑时序差不提示；失败静默——首页卡片本就展示
+  未授权状态与手动按钮兜底。
+- Watchdog 保持只读核对不改动（R8 边界：自动恢复是**事件驱动的一次性
+  恢复**，节流上限防其退化为「周期性后台写」；R12 对 R8 的修订边界
+  在 R14 第三次收窄为「打开应用自检触发的一次性恢复」）。
+
+**验证证据**：329 tests / 21 类 / 0 failures / 0 errors（新增
+AutoRestorePolicyTest 8 例 + AccessibilityAutoRestorerTest 6 例）；
+compileDebugKotlin + compileDebugUnitTestKotlin 强制重编译 0 warning。
+
+**实机验证点**（用户执行）：保持 adb 授权在位 → 应用内开关开启 →
+制造授权丢失 → 打开应用：Toast「检测到授权丢失，已自动恢复」且无需
+点任何按钮 → 服务自动重连。反向验证：应用内开关关闭时制造授权丢失 →
+打开应用不发生自动恢复（意图锚生效）。
+
+
+### 阶段 C 交付记录（2026-09-19）—— 网络层公共模块骨架
+
+按方案 §阶段C 交付「骨架 + 模式分发」，三个组件全部落地：
+
+- **`core/vpn/VpnArbitrator.kt`（最高优先）**：启动决策矩阵（§2.2/§6.9）
+  —— S4 不占 VPN 天然共存；占 VPN 模式遇其他 VPN 且 S4 可用时
+  **降级改写为 APP_FIREWALL**（`VpnStartDecision.mode` 是实际将采用的模式）；
+  无降级能力时让位不启动。「让位即让位」：绝不排队/轮询/自动重连，
+  与 R14 无障碍自动恢复是两个不同性质的问题（VPN 让位涉及接口争抢）。
+  两个探测注入为函数 → 决策矩阵 JVM 全测。
+- **`core/vpn/DnsPacketParser.kt`**：DNS UDP payload 层解析与响应构造
+  （不含 IP/UDP 头）。拦截响应 = **本地构造 NXDOMAIN**、上游故障 =
+  **SERVFAIL**（§4.3 ④ 不可混用）；构造采用「改写原查询字节」：
+  置 QR、写 RCODE、计数清零、长度不变。防御性拒绝清单：
+  过短 / QR=1 / opcode≠0 / QDCOUNT≠1 / QNAME 压缩指针 / 截断。
+- **`core/vpn/VpnTunConfig.kt`**：模式 → TUN 参数的**纯函数**，
+  把 S2 铁律（只 `addRoute("10.0.0.1", 32)`，绝不 `0.0.0.0/0`）
+  从注释升级为可执行断言；OFF/APP_FIREWALL 传入即抛错。
+- **`core/service/NoAdVpnService.kt`（骨架）**：完整启动决策链
+  （模式解析 → prepare 授权 → 仲裁 → establish）+ onRevoke 让位
+  （绝不自动重连）+ establish 前读上游 DNS（§4.3 ① 铁律）。
+  **包处理循环属阶段 D**：在其接入前本服务不得被任何路径启动
+  （当前仓库无 startService 调用，刻意为之）。
+- Manifest：服务声明 + `BIND_VPN_SERVICE`（系统持有权限）+ VpnService
+  intent-filter；容器：`vpnArbitrator` lazy + `ownVpnNetworkHandle`
+  （排除自身，骨架期恒 null）+ S4 能力探测恒 false（阶段 E 接线，保守不虚报）。
+
+验证证据：354 tests / 24 类 / 0 failures / 0 errors（新增
+VpnArbitratorTest 7 + DnsPacketParserTest 13 + VpnTunConfigTest 5）；
+强制重编译 0 warning。
+
+### 阶段 C：网络层公共模块（✅ 骨架已交付，见上方交付记录）
+8. `VpnArbitrator`（让位仲裁）—— **最高优先** ✅
+9. `DnsPacketParser`（`DomainRuleEngine` 已完成）✅
+10. `NoAdVpnService` 骨架 + 模式分发 ✅
+
+### 阶段 D 交付记录（2026-09-19）—— S2 DNS 模式闭环
+
+**数据通路**（DNS_ONLY / HYBRID 的 VPN 部分）：
+
+```
+TUN 读包 → Ip4UdpPacket 解析（只认 IPv4/UDP；非 UDP:53 防御性丢弃）
+  → DnsPacketParser 提取域名 → DnsInterceptor（DomainRuleEngine 白名单优先）
+      ├─ Blocked → 本地构造 NXDOMAIN → 写回 TUN
+      └─ Forward → DnsForwarder（protect socket）转发真实上游
+            ├─ 有响应 → 写回 TUN
+            └─ 全部上游失败 → 本地构造 SERVFAIL 写回 TUN（§4.3④ 不可混用）
+```
+
+**新组件**（`core/vpn/`，全部 JVM 可测）：
+
+- `Ip4UdpPacket`：IPv4/UDP 字节层解析 + 响应包构造。响应**复用原查询包**：
+  交换 IP/端口、替换 payload、改写长度、重算 IP 头校验和；UDP 校验和置 0
+  （RFC 768 对 IPv4 合法）。测试锁定了「反码求和折叠 = 0xFFFF」校验性质。
+- `DnsInterceptor`：决策层，引擎经 `() -> DomainRuleEngine` 注入
+  （包循环消费 `DomainRuleRepository.engine.value`）。Ignore 只出现在
+  畸形流量 —— 正常域名一律 Forward，绝不吞掉正常解析。
+- `DnsForwarder`：IO 层。`protectSocket` 注入（生产 = `VpnService::protect`）；
+  `dnsPort` 注入（生产恒 53）使 JVM localhost 回环闭环测试可行；
+  失败一律返回 null 绝不抛出，由循环统一回退 SERVFAIL。
+
+**服务接线**（NoAdVpnService，阶段 D 主体）：
+
+- DNS 包循环独立线程阻塞读 TUN；`onDestroy` 关闭 TUN 使 read 抛出自然
+  退出（不 stop 线程，避免与关闭时序竞态）；
+- FULL_TRAFFIC 请求**拒绝启动**（全流量循环属阶段 E：半启动会让系统 DNS
+  指向无人应答的虚拟地址，全设备解析超时）；
+- 容器 `ownVpnRunning` 标志：`detectOtherVpnActive` 开头短路 —— 系统 VPN
+  单实例，自己在跑时其他 VPN 必然不存在（替代了 network handle 方案，
+  VpnService 无公开 API 取自身 handle）。
+
+**UI 接线**（NetworkViewModel / NetworkScreen）：
+
+- `setMode(DNS_ONLY)`：仲裁 → `VpnService.prepare` → 已授权直接
+  `startService`；未授权 → `vpnPermissionIntent` 交给页面
+  `rememberLauncherForActivityResult` 启动系统授权对话框，结果回传 VM；
+- **mode 落盘时机即 UI 真相**：只在启动动作确实发出后写 DataStore；
+  让位 / 用户取消授权时不落盘（单选框永远反映实际状态）；
+- `yielded` 改为直接订阅 DataStore（服务 onRevoke 的写入对页面即时可见，
+  消除内存副本的双真相）；
+- FULL_TRAFFIC / APP_FIREWALL / HYBRID：不落盘 + toast「后续版本接入」
+  （HYBRID 的 S4 部分未接线，只跑 S2 会误导用户以为应用断网已生效）。
+
+验证证据：376 tests / 27 类 / 0 failures / 0 errors（新增 Ip4UdpPacketTest
+11 + DnsInterceptorTest 6 + DnsForwarderTest 5）；强制重编译 0 warning。
+
+### 阶段 D 后续 hotfix 记录（1.1 → 1.2.5，2026-09-20 凌晨，实机验证驱动）
+
+实机验证暴露的问题与修复（versionCode 随交付递增，实机验证一律由用户
+Android Studio 自建部署，**不再打包交付**）：
+
+- **1.2-s2ui（首页状态接线遗漏）**：阶段 D 只接了网络过滤页，首页
+  「拦截策略」卡的 DNS 行仍硬编码「未接入」——服务在跑但 UI 不反映。
+  修复：新增 `VpnStateHolder`（进程内单例，模式同 AccessibilityStateHolder，
+  真值 =「TUN 已建立且包循环在跑」，由服务 establish/onDestroy/onRevoke
+  维护）；首页 DNS 行改为**意图 × 事实**（`running && mode.occupiesVpn`，
+  plan §7.1 ProtectionState 语义）——模式选「关闭」就必须显示已停，
+  运行标志残留也不能误显。教训：接完服务必须全局搜「占位接线点」，
+  「UI 接真实状态」包含首页而非仅设置页。
+- **1.2.1-s2fix（上游 IPv6 致瘫）**：`readUpstreamDnsServers` 不过滤地址族，
+  `DatagramSocket`（IPv4 socket）connect IPv6 上游抛异常被吞成 null；
+  若网络只下发 IPv6 DNS → 全部转发失败 → 全 SERVFAIL → 全设备解析瘫痪。
+  修复：`filterIsInstance<Inet4Address>()` + 上游列表日志。同包把包循环
+  的静默 catch 改为留痕日志（曾致循环静默死亡无诊断线索）。
+- **1.2.2-s2stop（VPN 图标残留）**：选「关闭」后状态栏钥匙图标不消失 ——
+  依赖 `stopService()` 的隐式销毁回调对 VpnService 不可靠，close pfd
+  才是撤销 TUN 的唯一确定途径。修复：显式 **ACTION_STOP** 指令经
+  startService 送达，onStartCommand 首判处理（closeTun + stopSelf + 日志），
+  幂等安全。注意勿用 startForegroundService 发送停止指令（服务未调
+  startForeground 会崩溃）；用户切「关闭」必然在前台，startService 合法。
+- **1.2.3-s2diag（取证增强）**：unparseable 分支每天包 dump 头部 20 字节
+  hex（最多 3 个），用于区分「版本/协议/偏移」哪类不符。此包直接产出
+  1.2.4 的决定性证据（见下）。
+- **1.2.4-s2localfix（🔴 全挂根因：local 路由表劫持）**：实机取证链条——
+  ① hex dump 显示 TUN 里只有 IPv6 ICMPv6 NDP（`60 00 ... FE80...`），
+  **零个 IPv4 DNS 查询**；② 设备上 `ping 10.0.0.1` 得到 **ttl=64 的本地
+  应答**（应用日志无包）。结论：`ip rule` 第 0 条 `from all lookup local`
+  优先级最高，而 **10.0.0.1 被 addAddress 配成 TUN 自身地址后，发往它的
+  DNS 查询被内核 local 表劫持**交给本机协议栈（UDP:53 无人监听即丢弃），
+  永远到不了 TUN 用户态。**这是 plan §4.1 原方案（addAddress 与
+  addDnsServer 同用 10.0.0.1）的方案级错误**——桌面单测构造的包不含该
+  语义，380 例全绿也测不出。修复（业界标准拓扑，两地址必须分离）：
+  DNS_ONLY → address=10.0.0.1/32，**dns=10.0.0.2，route=10.0.0.2/32**；
+  FULL_TRAFFIC → address=10.0.0.2/32，dns=10.0.0.3，route=0.0.0.0/0。
+  响应包目标 10.0.0.1:port 为本机地址，由内核 UDP 栈按端口交付客户端，
+  链路闭合。`VpnTunConfigTest` 新增防回归断言：**任何模式
+  dnsServer != address**；§4.1 方案代码已标注修订。
+  验证效果：修复后实机日志首次出现 `dns#1 domain=mtalk.google.com ->
+  Forward` —— DNS 查询成功进入 TUN 并被解析判定（全链路前半段打通）。
+- **1.2.5-s2perm（转发 socket EPERM + 进程崩溃双修复）**：查 DNS 查询
+  进来后的下一步时发现两个叠加缺陷——① `packet loop exited:
+  SocketException: socket failed: EPERM`：**Manifest 缺
+  `INTERNET` 权限**（应用此前从不联网，创建时漏了；无此权限 `socket()`
+  直接 EPERM），补 `uses-permission android.permission.INTERNET`；
+  ② `FATAL EXCEPTION ... HomeViewModel.toast`：**R14 自动恢复在 IO 协程
+  成功后调 Toast**，子线程无 Looper 直接 FATAL 崩溃 → 进程死亡 →
+  VPN 服务随之被杀 → **「图标闪一下就消失」的真凶**；修复：
+  HomeViewModel.toast 统一 `Handler(mainLooper).post`。
+  教训：新能力引入新系统依赖（联网/线程）时先查权限与线程约束——
+  这两类问题单测永远测不出（权限与 Looper 是运行时语义）。
+
+验证证据：381 tests / 28 类 / 0 failures / 0 errors（含 VpnTunConfigTest
+防回归断言 +VpnStateHolderTest 4）；强制重编译 0 warning。
+
+### S1 开屏拦截性能优化（1.3-s1perf，2026-09-20）
+
+**问题（用户实机报告）**：B 站等应用启动时先显示「非广告启动画面」、
+随后才出现广告页 —— 这类场景下拦截响应慢，有时超过 2 秒才点到跳过。
+
+**根因（代码层证据，非猜测）**：
+
+1. **预筛对含 VIEW_ID 规则的应用恒放行**：`EventPreFilter.isUnfilterable`
+   遇到任何 VIEW_ID/COORDINATE/REGEX 规则即整体放行（安全设计：
+   事件不携带 viewId）。B 站规则含 3 条 VIEW_ID + 3 条通用 VIEW_ID
+   → **每个 `TYPE_WINDOW_CONTENT_CHANGED` 事件都会触发全树扫描**；
+2. **单次扫描极贵**：`UiTreeScanner.snapshotOf` 每节点读取 12 个字段
+   （viewId/text/className/isClickable/isVisibleToUser/bounds…），
+   **每个字段一次跨进程 IPC**；数百节点的界面即数千次 IPC、数百毫秒；
+3. **扫描串行发生在主线程**：`process()` 由 `onAccessibilityEvent` 同步
+   调用 → 应用启动期数十个事件**排队等待** → 广告页出现后的第一个
+   事件要等队列清空 —— 这即是用户感知的「超过 2 秒」。
+
+**方案：两段式流水线（主线程零 IPC + 后台合并消费）**
+
+```
+主线程（必须尽快返回）
+  闸门1 包名/纳管/规则数（内存哈希查表）
+  → 闸门2 事件类型 → 闸门2.5 廉价预筛（事件自带文本，纯字符串）
+  → 提取纯数据 ScanRequest → 投递「最新覆盖」槽位 → return Queued
+
+后台单消费者（扫描重活全在此）
+  取最新请求 → 窗口重置（如有）→ 闸门3 Activity
+  → 扫描节点树 → 匹配 → 防误点闸门 → 投递点击（独立协程）→ 记录诊断
+```
+
+**关键设计决策**：
+
+- **合并语义等价性**：扫描对象是**当前界面快照**（`rootInActiveWindow`）
+  而非事件对象；连续 N 个事件只处理最新一个，其扫描**包含前 N-1 个
+  能看到的一切**。因此合并是等价变换（把启动期数十次扫描压成 1~2 次），
+  **不丢任何可观测信息**，也不违反「预筛只放宽不收紧」；
+- **`LatestRequestQueue`（新纯逻辑件）**：原子槽位 + 覆盖式投递，
+  合并语义由 `LatestRequestQueueTest` 直接锁定；
+- **drain 循环 + 收尾重查**：`workerActive` 保证单消费者串行
+  （也因此 `AntiMisclickGate` 这个非线程安全 Map 无需加锁）；
+  poll 返回 null 与置位清零之间到达的请求由收尾重查兜住；
+- **窗口重置用 OR 累积标记**（`pendingWindowReset`）：合并会覆盖请求，
+  但**任何一次**窗口切换都必须重置防误点记账（否则新界面广告点不掉
+  —— 历史 bug）；主线程只置原子位，消费者线程执行 `gate.reset()`；
+- **`ProcessOutcome.Queued`（新中间态）**：投递后结果未定，不能谎报
+  `ClickScheduled`；诊断**不计入 totalEvents**（真实结果稍后覆盖记录），
+  避免一次事件被计数两次；
+- **时钟与日志注入**：`clock` / `log` 注入为函数（项目既有时钟注入惯例）。
+  实测踩坑：Android 的 `SystemClock`/`Log` 在 JVM 单测中抛 "not mocked"，
+  且位于消费者首行 —— 异常被 `runCatching` 吞掉，表现为「后台从未扫描」，
+  排查成本高；注入后流水线在 JVM 上完全可测；
+- **可测性拆分**：`submit(...)` 为纯数据入口（闸门/预筛/投递全在此），
+  `process(event, ...)` 退化为字段提取的薄适配层 ——
+  原先整条事件链因 `AccessibilityEvent` 无法在 JVM 构造而零测试，
+  现在闸门顺序、线程契约、合并语义全部有单测。
+
+**验证证据**：394 tests / 30 类 / 0 failures / 0 errors
+（新增 LatestRequestQueueTest 4 + EventProcessorTest 9：闸门顺序 6、
+线程契约 1、合并语义 1 等）；强制重编译 0 warning。
+实机效果待用户 Android Studio 自建部署复测（预期：启动期事件风暴
+由「每次事件一次全树扫描」降为「至多两次扫描」）。
+
+### 阶段 F 完整交付（F1–F7 + 降级链路，1.4-s4phase）
+
+**交付总览**（全部走已验证的 Shizuku `exec` 通道：字符串命令 + 回读验证）：
+
+| 能力 | 组件 | 关键设计 |
+|---|---|---|
+| F1 能力探测 | `ShizukuCapabilityProbe` + `ShizukuCapabilityHolder` | **逐项、运行时、可失败**：某设备缺 Chain-3 只让断网降级，其余能力不受影响；探测结果缓存为 StateFlow（仲裁侧需同步读） |
+| F3 应用级断网 | `AppFirewallOps` + `AppFirewallController` | Chain-3；**取反语义集中承担**（blocked=true→networking=false）；回读 `<pkg>:allow/deny` 确认 |
+| F4 Private DNS | `PrivateDnsOps` + `PrivateDnsController` | mode+specifier **必须成对写入**；主机名校验拒绝 URL 形态（避免整机断网）；回读两个字段 |
+| F5 组件停用 | `PackageOps` + `PackageController` | 应用级 `disable-user` / 组件级 `pm disable`；回读 `pm list packages -d` 与 `dumpsys enabledComponents`；**代码层强制拒绝系统应用** |
+| F6 AppOps | `AppOpsOps` + `AppOpsController` | 🔴 **全字符串操作名，绝无数值 opCode**（版本漂移会静默改错权限）；回读精确到目标 Op 行 |
+| F7 强制停止 | `ProcessController` | **按包 10s 冷却**（破坏性操作防重复）；回读 `pidof` 识别「被自启拉起」的假成功 |
+| §6.9 降级链路 | 容器 `vpnArbitrator` + `NoAdVpnService` | 仲裁的 `canControlPerAppNetwork` **接真实能力**（不再恒 false）；让位时对 `TargetApp.appFirewallEnabled` 的应用执行断网 |
+
+**命令与输出格式全部来自实机实测**（NX789J / Android 15，只读探测）：
+`cmd connectivity set-chain3-enabled true` → rc=0；
+`cmd connectivity get-package-networking-enabled <pkg>` → `<pkg>:allow`；
+`cmd appops get <pkg> RUN_IN_BACKGROUND` → `No operations.`/`Default mode: allow`；
+`settings get global private_dns_mode` → `null`（未设置）；
+`dumpsys package` → `User 0: ... enabled=0` + `enabledComponents:` 段。
+
+**配套修正**：`S1RuleCache` 的快照新增 `firewallPackages`（`appFirewallEnabled` 的包集合），
+并把「rules 为空 → 整个快照 EMPTY」改为「apps 为空才 EMPTY」——
+后者会连带丢失纳管集合与断网目标（「只开 S4 不要 S1」的用户拿不到断网目标）。
+`VpnTunConfig` 同步：S3 的 DNS 虚拟地址改 `10.0.0.3`（同样不得等于 TUN 地址）。
+
+**阶段 E 交付（数据层，1.4-s4phase）**：
+
+- `DnsPacketParser.parseFirstARecord()`：从 DNS 响应解析首条 A 记录
+  （Answer 名字为压缩指针，`skipName` 只定位不还原）；
+- `DnsPacketParser.parseQuestionDomain()`：响应报文同样携带 Question 回显，
+  用于建立映射（不能复用 `parseQuery` —— 它按设计拒绝 QR=1）；
+- `Ip4UdpPacket`：`Ip4UdpFrame` 新增 `sourceIp`/`destinationIp`（32 位打包）
+  与 `ipToString`；
+- `IpDomainMap`：IP→域名映射，TTL 5 分钟 + 惰性清理（`ConcurrentHashMap`）；
+- `TrafficFilter`：目标 IP → 反查域名 → 引擎判定；**无映射一律放行**
+  （`UNKNOWN_IP`：直连/DoH/过期都是常态，丢弃等于断网）。
+
+**S3 启动入口保持关闭（如实边界）**：S3 接管全部流量后，**未命中的流量必须
+由我们转发**；TCP 转发需要完整状态机（握手/序列号/窗口/重传），等价于
+tun2socks 级实现，无法在「纯 JVM 测试 + 无实机」约束下可靠交付。
+当前 UI 文案已如实改为「需要完整 TCP/UDP 转发栈，尚未实现」。
+数据层组件就绪后，未来接入 tun2socks 即可启用 S3。
+
+**未接线项（下一步）**：F3/F4/F5/F6/F7 的 **UI 入口**（「增强能力」设置页、
+应用管理页的 S4 勾选、网络页的「应用级断网」模式启动链路）。
+
+验证证据：479 tests / 38 类 / 0 failures / 0 errors（新增
+AppFirewallOps 12 + PrivateDnsOps 16 + CapabilityProbe 5 + PackageOps 13 +
+AppOpsOps 11 + ProcessController 10 + IpDomainMap 9 + TrafficFilter 10）；
+强制重编译 0 warning。
 
 ### 阶段 D：S2 DNS 模式
-11. DNS-only 路由配置 + 包处理循环
-12. 上游 DNS 读取 + `protect()` 转发
-13. 构造 NXDOMAIN/SERVFAIL 响应
-14. 网络过滤页 UI 接线真实状态
+11. DNS-only 路由配置 + 包处理循环 ✅
+12. 上游 DNS 读取 + `protect()` 转发 ✅
+13. 构造 NXDOMAIN/SERVFAIL 响应 ✅
+14. 网络过滤页 UI 接线真实状态 ✅
 
 ### 阶段 E：S3 全流量模式
 15. 全路由配置 + 包处理循环
